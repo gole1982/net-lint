@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>华为VRP基线检查工具</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-brand">华为VRP基线检查工具 v2.2</div>
+    <div class="nav-tabs">
+      <a href="#devices" class="tab active" data-view="devices">设备管理</a>
+      <a href="#rules" class="tab" data-view="rules">规则配置</a>
+      <a href="#tasks" class="tab" data-view="tasks">检查任务</a>
+      <a href="#system" class="tab" data-view="system">系统信息</a>
+    </div>
+  </nav>
+
+  <main id="app">
+    <!-- 设备管理 -->
+    <section id="view-devices" class="view active">
+      <div class="section-header">
+        <h2>设备管理</h2>
+        <div class="actions">
+          <button onclick="showAddDevice()" class="btn btn-primary">+ 添加设备</button>
+          <label class="btn btn-secondary">
+            导入CSV
+            <input type="file" accept=".csv" onchange="importCSV(event)" hidden>
+          </label>
+        </div>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>IP地址</th>
+            <th>平台</th>
+            <th>用户名</th>
+            <th>密码</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="device-list"></tbody>
+      </table>
+    </section>
+
+    <!-- 规则配置 -->
+    <section id="view-rules" class="view">
+      <div class="section-header">
+        <h2>规则配置</h2>
+      </div>
+      <div class="rules-layout">
+        <div class="rules-panel">
+          <h3>规则开关</h3>
+          <table class="data-table">
+            <thead>
+              <tr><th>规则ID</th><th>标题</th><th>严重度</th><th>平台</th><th>启用</th></tr>
+            </thead>
+            <tbody id="rule-list"></tbody>
+          </table>
+        </div>
+        <div class="rules-panel">
+          <h3>全局变量</h3>
+          <div id="variables-editor"></div>
+          <button onclick="saveVariables()" class="btn btn-primary" style="margin-top:12px">保存变量</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 检查任务 -->
+    <section id="view-tasks" class="view">
+      <div class="section-header">
+        <h2>检查任务</h2>
+        <div class="actions">
+          <button onclick="startTask(false)" class="btn btn-primary">在线检查</button>
+          <button onclick="startTask(true)" class="btn btn-secondary">离线检查</button>
+        </div>
+      </div>
+      <div id="task-progress" class="task-progress" style="display:none">
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+        <span id="progress-text">0%</span>
+        <span id="progress-detail"></span>
+      </div>
+      <div id="task-results"></div>
+    </section>
+
+    <!-- 系统信息 -->
+    <section id="view-system" class="view">
+      <div class="section-header">
+        <h2>系统信息</h2>
+        <button onclick="runSelfCheck()" class="btn btn-primary">环境自检</button>
+      </div>
+      <div id="system-info" class="info-panel"></div>
+    </section>
+  </main>
+
+  <!-- 添加设备弹窗 -->
+  <div id="device-modal" class="modal" style="display:none">
+    <div class="modal-content">
+      <h3 id="modal-title">添加设备</h3>
+      <form id="device-form" onsubmit="saveDevice(event)">
+        <input type="hidden" id="orig-ip">
+        <div class="form-row"><label>设备名称</label><input type="text" id="dev-name" required></div>
+        <div class="form-row"><label>IP地址</label><input type="text" id="dev-ip" required></div>
+        <div class="form-row"><label>平台</label>
+          <select id="dev-platform"><option value="s-series">S系列</option><option value="ce-series">CE系列</option></select>
+        </div>
+        <div class="form-row"><label>用户名</label><input type="text" id="dev-username" value="admin"></div>
+        <div class="form-row"><label>密码</label><input type="password" id="dev-password" placeholder="留空则从环境变量读取"></div>
+        <div class="form-actions">
+          <button type="button" onclick="closeModal()" class="btn btn-secondary">取消</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

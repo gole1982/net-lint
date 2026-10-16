@@ -1,0 +1,68 @@
+# ============================================================
+# docker-compose.yml — 华为VRP基线检查工具
+# ============================================================
+#
+# 用法:
+#   docker compose up -d              # 启动 Web 服务 (后台)
+#   docker compose logs -f            # 查看实时日志
+#   docker compose down               # 停止并删除容器
+#
+# CLI 模式 (一次性运行):
+#   docker compose run --rm cli --offline       # 离线检查
+#   docker compose run --rm cli --selfcheck     # 环境自检
+#   docker compose run --rm cli                  # 在线检查(Telnet)
+#
+# 数据目录:
+#   ./data/  (自动创建, 挂载到容器 /app/data)
+#     ├── devices.csv     设备清单
+#     ├── profile.yaml    用户配置
+#     ├── snapshots/      配置快照
+#     └── output/         报告输出(MD + XLSX)
+#
+# ============================================================
+
+services:
+  # ---- Web 服务 (常驻) ----
+  web:
+    build: .
+    image: vrp-baseline:2.2
+    container_name: vrp-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    volumes:
+      # 用户配置文件 (只读挂载)
+      - ./data/devices.csv:/app/devices.csv:ro
+      - ./data/profile.yaml:/app/profile.yaml:ro
+      - ./data/rules.yaml:/app/rules.yaml:ro
+      # 可读写目录
+      - ./data/snapshots:/app/snapshots
+      - ./data/output:/app/output
+    environment:
+      - TZ=Asia/Shanghai
+      # 设备密码通过环境变量传递 (推荐, 不写入CSV)
+      # 格式: VRP_PASS_<IP> (IP中点号替换为下划线)
+      # - VRP_PASS_10_10_1_11=your_password
+    networks:
+      - vrp-net
+
+  # ---- CLI 一次性任务 ----
+  cli:
+    build: .
+    image: vrp-baseline:2.2
+    profiles: ["cli"]  # 不随 docker compose up 启动, 按需运行
+    entrypoint: ["/app/docker-entrypoint.sh", "cli"]
+    volumes:
+      - ./data/devices.csv:/app/devices.csv:ro
+      - ./data/profile.yaml:/app/profile.yaml:ro
+      - ./data/rules.yaml:/app/rules.yaml:ro
+      - ./data/snapshots:/app/snapshots
+      - ./data/output:/app/output
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - vrp-net
+
+networks:
+  vrp-net:
+    driver: bridge

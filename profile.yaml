@@ -1,0 +1,56 @@
+# =============================================================================
+# profile.yaml — 用户配置文件
+# =============================================================================
+#
+# 这是用户唯一需要编辑的配置文件, 包含两部分:
+#
+# 1. variables — 全局变量定义
+#    规则库 (rules.yaml) 中通过 ${varName} 引用的变量必须在此定义。
+#    变量值可以是字符串或列表; 列表类型在正则中展开为 (?:val1|val2) 多选组。
+#    变量名只能包含字母、数字和下划线, 不能以数字开头。
+#
+# 2. rules — 规则开关
+#    每条规则通过规则ID进行开关控制:
+#      true  → 启用该规则并检查
+#      false → 跳过该规则
+#    规则ID必须与 rules.yaml 中定义的 id 一致。
+#
+# 编辑步骤:
+#   a) 修改 variables 中的值为实际环境的参数(NTP服务器IP、SNMP团体字等)
+#   b) 根据实际需要, 将对应规则的开关设为 true 或 false
+#   c) 运行 ./run.sh 或 ./run.sh --offline 开始检查
+#
+# 注意: 修改变量值后, 离线模式可直接复用已有快照重跑; 在线模式需重新采集。
+#
+# =============================================================================
+
+profile: 华为园区交换机基线策略
+
+# ==================== 全局变量 ====================
+# 所有 ${var} 引用必须在此定义, 否则程序启动时会报错
+# 规则引用未定义变量时, 会抛出 KeyError 指明规则ID和变量名
+variables:
+  ntpServer1: 10.1.1.100          # SW-NTP-01: 第一NTP服务器IP
+  ntpServer2: 10.1.1.101          # SW-NTP-01: 第二NTP服务器IP
+  snmpRo: Ro@Huawei123            # SW-SNMP-01: SNMP只读团体字
+  snmpRw: Rw@Huawei123            # SW-SNMP-02: SNMP读写团体字
+  trapHost: 10.1.1.200            # SW-SNMP-04: Trap告警主机地址
+  snmpAcl: "2000"                 # SW-SNMP-05: SNMP限制ACL号(引号防止YAML解析为整数)
+
+# ==================== 规则开关 ====================
+# true = 启用并检查 | false = 跳过
+# 规则仅在设备 platform 匹配时才会执行(由引擎自动过滤)
+# 例如 SW-PS-01 标记为 true, 但只有 devices.csv 中 platform=s-series 的设备会执行
+rules:
+  SW-NTP-01: true                 # NTP时间同步(兼容ntp/ntp-service前缀)
+  SW-SNMP-01: true                # SNMP只读团体字(RO)
+  SW-SNMP-02: true                # SNMP读写团体字(RW)
+  SW-SNMP-03: true                # SNMP v2c版本
+  SW-SNMP-04: true                # suggest级, 仅建议配置Trap主机
+  SW-SNMP-05: false               # 未部署SNMP ACL则关闭
+  SW-DHCP-01: true                # 禁止dhcp enable
+  SW-IPV6-01: true                # 仅S系列设备执行(内置策略链追踪)
+  SW-DHCP-02: true                # 仅S系列设备执行(内置策略链追踪)
+  SW-VLAN1-01: true               # VLAN1禁用(内置检查)
+  SW-PS-01: true                  # 仅S系列设备执行(port-security)
+  SW-PS-02: false                 # 有CE系列设备时开启(mac-limit)

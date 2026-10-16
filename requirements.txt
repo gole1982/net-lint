@@ -1,0 +1,37 @@
+# ============================================================
+# 华为VRP基线检查工具 Python依赖
+# ============================================================
+# 版本与 vendor/ 中完全一致, 用于 Docker 容器化构建
+# ------------------------------------------------------------
+
+# --- 核心依赖 (CLI + 报告生成) ---
+PyYAML==6.0.3
+openpyxl==3.1.5
+et-xmlfile==2.0.0
+
+# --- Web服务依赖 (FastAPI + ASGI) ---
+fastapi==0.143.2
+uvicorn==0.54.0
+pydantic==2.14.1
+starlette==1.8.0
+
+# --- pydantic 内部依赖 ---
+pydantic-core==2.50.1
+annotated-types==0.8.0
+annotated-doc==0.0.5
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+
+# --- uvicorn 内部依赖 ---
+click==8.5.0
+h11==0.16.0
+
+# --- anyio/starlette 内部依赖 ---
+anyio==4.15.1
+idna==3.20
+
+# --- FastAPI 文件上传 ---
+python-multipart==0.0.32
+
+# --- FastAPI 可观测性 (fastapi 0.143 自动引入) ---
+opentelemetry-api==1.45.1

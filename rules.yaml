@@ -1,0 +1,301 @@
+# =============================================================================
+# rules.yaml — 华为VRP基线规则库
+# =============================================================================
+#
+# 版本: 2.2
+# 维护者: 规则作者(随程序版本发布)
+# 用户不应直接编辑此文件。编辑 profile.yaml 启用/禁用规则并填入变量值。
+#
+# ── 规则结构 ──────────────────────────────────────────────────────────────
+#
+# rules:
+#   - id:          规则唯一标识(如 SW-NTP-01), 用于profile.yaml开关引用
+#     title:       规则标题(中文简述)
+#     device_type: 设备类型, 需与 devices.csv 中 type 字段匹配(如 "交换机")
+#     platforms:   适用平台列表 [s-series, ce-series]
+#     severity:    严重度 [high | medium | low | suggest]
+#     builtin:     (可选) 引擎内置检查函数名, 用于复杂逻辑(策略链追踪等)
+#     sections:    检查段落列表(见下方)
+#
+# ── section 结构 ─────────────────────────────────────────────────────────
+#
+#   - context:     配置上下文
+#                  system     → 检查全局配置段(display current-configuration
+#                               输出的第一个 # 之前的部分)
+#                  interface  → 检查接口配置段, 通过 selector 筛选目标接口
+#   selector:       通配符列表, 仅 context != system 时有效
+#                  ['GigabitEthernet*', 'XGigabitEthernet*'] 等
+#                  '*' 匹配所有
+#   preconds:       前提条件(可选)
+#                  include: [正则...]  全部命中才检查该配置块
+#                  exclude: [正则...]  全部不命中才检查该配置块
+#   checks:         检查项列表
+#     - kind:       vrp  → 每行都必须命中(AND)
+#                  any  → 至少一行命中即合规(OR)
+#                  not  → 每行都不得出现(禁止类)
+#       match:      exact → 整行精确匹配(忽略首尾空格和缩进)
+#                  regex → 正则search模式
+#       lines:      模板行列表, 支持 ${var} 变量引用
+#   fix:            整改命令模板(Markdown报告输出), 支持 ${var} 和 ${if}
+#
+# ── 变量引用 ─────────────────────────────────────────────────────────────
+#
+#   ${varName}  → 引用 profile.yaml 中 variables 定义的变量值
+#                  列表类型变量会展开为 (?:val1|val2) 正则组
+#   ${if}      → 内置变量, 替换为当前不合规的目标名(接口名或视图名)
+#   ${platform} → 内置变量, 替换为当前设备平台标识
+#
+# ── VRP唯一前缀兼容 ──────────────────────────────────────────────────────
+#
+# 华为VRP支持唯一前缀替代。例如当设备上只有 ntp-service 开头的命令时,
+# 输入 ntp 即可代表 ntp-service。规则正则使用 ntp(?:-service)? 同时匹配
+# 完整形式和缩写形式, 确保不同VRP版本和CE系列均能匹配。
+#
+# ── 配置分段机制 ─────────────────────────────────────────────────────────
+#
+# VRP display current-configuration 输出以单独的 '#' 行作为段落分隔符。
+# 第一个段落为全局配置(system), 后续每个段落为一个配置块(如接口段)。
+# 引擎按 (?m)^#\s*$ 分割, 段首行作为上下文标识(如 "interface GE0/0/1")。
+#
+# ── 内置检查函数 ─────────────────────────────────────────────────────────
+#
+#   ipv6_deny_chain  IPv6流量策略阻断
+#     追踪 ACL(0x86dd deny) → 流分类 → 流行为(deny) → 流策略 → 应用位置
+#     全局应用 = PASS; 接口逐个覆盖 = PASS; 存在未覆盖端口 = WARN
+#
+#   dhcp_deny_chain  DHCP流量策略阻断
+#     追踪 ACL(UDP 67+68 双向 deny) → 流分类 → 流行为 → 流策略 → 应用位置
+#     必须同时覆盖 UDP 67 和 68 才视为ACL命中
+#
+#   vlan1_check       VLAN1禁用检查
+#     检查 Vlanif1 是否存在
+#     检查 trunk 口是否放行 VLAN1(含 allow-pass all / pvid=1)
+#     检查 access/hybrid 口是否划入 VLAN1
+#     检查未显式配置 link-type 的端口(默认 pvid=1)
+#
+# =============================================================================
+
+version: "2.2"
+
+rules:
+
+  # ==================== NTP ====================
+  - id: SW-NTP-01
+    title: 必须配置NTP并指向指定服务器
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: high
+    sections:
+      - context: system
+        checks:
+          - kind: any
+            match: regex
+            lines:
+              # 兼容 ntp 和 ntp-service 唯一前缀
+              - '^ntp(?:-service)? unicast-server ${ntpServer1}\s*$'
+              - '^ntp(?:-service)? unicast-server ${ntpServer2}\s*$'
+        fix: |
+          system-view
+          ntp-service unicast-server ${ntpServer1}
+
+  # ==================== SNMP ====================
+  - id: SW-SNMP-01
+    title: 必须配置SNMP只读团体字(RO)
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: high
+    sections:
+      - context: system
+        checks:
+          - kind: vrp
+            match: regex
+            lines:
+              - '^snmp-agent community read\b'
+        fix: |
+          system-view
+          snmp-agent community read cipher ${snmpRo}
+
+  - id: SW-SNMP-02
+    title: 必须配置SNMP读写团体字(RW)
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: high
+    sections:
+      - context: system
+        checks:
+          - kind: vrp
+            match: regex
+            lines:
+              - '^snmp-agent community write\b'
+        fix: |
+          system-view
+          snmp-agent community write cipher ${snmpRw}
+
+  - id: SW-SNMP-03
+    title: 必须显式启用SNMP v2c版本
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: high
+    sections:
+      - context: system
+        checks:
+          - kind: vrp
+            match: regex
+            lines:
+              - '^snmp-agent sys-info version.*\bv2c\b'
+        fix: |
+          system-view
+          snmp-agent sys-info version v2c
+
+  - id: SW-SNMP-04
+    title: 建议配置SNMP Trap告警主机
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: suggest
+    sections:
+      - context: system
+        checks:
+          - kind: vrp
+            match: regex
+            lines:
+              - '^snmp-agent target-host\b'
+        fix: |
+          system-view
+          snmp-agent target-host trap-hostname nms address ${trapHost} udp-port 162 params securityname nms v2c
+
+  - id: SW-SNMP-05
+    title: 建议通过ACL限制SNMP源地址
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: suggest
+    sections:
+      - context: system
+        checks:
+          - kind: vrp
+            match: regex
+            lines:
+              - '^snmp-agent acl\b'
+        fix: |
+          system-view
+          snmp-agent acl ${snmpAcl}
+
+  # ==================== DHCP 禁用 ====================
+  - id: SW-DHCP-01
+    title: 禁止设备启用DHCP服务或中继
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: high
+    sections:
+      - context: system
+        checks:
+          - kind: not
+            match: exact
+            lines:
+              - dhcp enable
+        fix: |
+          system-view
+          undo dhcp enable
+
+  # ==================== IPv6 策略阻断 (S系列) ====================
+  - id: SW-IPV6-01
+    title: 必须通过流量策略完整阻断IPv6报文
+    device_type: 交换机
+    platforms: [s-series]
+    severity: high
+    builtin: ipv6_deny_chain
+    fix: |
+      acl 4000
+       rule 5 deny l2-protocol 0x86dd
+      traffic classifier IPV6_DENY
+       if-match acl 4000
+      traffic behavior IPV6_DENY
+       deny
+      traffic policy IPV6_DENY
+       classifier IPV6_DENY behavior IPV6_DENY
+      traffic-policy IPV6_DENY global inbound
+
+  # ==================== DHCP 策略阻断 (S系列) ====================
+  - id: SW-DHCP-02
+    title: 必须通过流量策略阻断一切DHCP报文(UDP 67/68)
+    device_type: 交换机
+    platforms: [s-series]
+    severity: high
+    builtin: dhcp_deny_chain
+    fix: |
+      acl 3000
+       rule 5 deny udp destination-port eq 67
+       rule 10 deny udp destination-port eq 68
+      traffic classifier DHCP_DENY
+       if-match acl 3000
+      traffic behavior DHCP_DENY
+       deny
+      traffic policy DHCP_DENY
+       classifier DHCP_DENY behavior DHCP_DENY
+      traffic-policy DHCP_DENY global inbound
+
+  # ==================== VLAN1 禁用 ====================
+  - id: SW-VLAN1-01
+    title: 禁止任何在用端口承载VLAN1
+    device_type: 交换机
+    platforms: [s-series, ce-series]
+    severity: high
+    builtin: vlan1_check
+    fix: |
+      interface ${if}
+       port trunk allow-pass vlan 2 to 4094
+
+  # ==================== 端口安全 (S系列) ====================
+  - id: SW-PS-01
+    title: 非trunk在用端口必须启用端口安全
+    device_type: 交换机
+    platforms: [s-series]
+    severity: high
+    sections:
+      - context: interface
+        selector:
+          - 'GigabitEthernet*'
+          - 'XGigabitEthernet*'
+          - 'MultiGE*'
+          - 'Ethernet*'
+        preconds:
+          exclude:
+            - 'port link-type trunk'
+            - 'eth-trunk'
+            - '^\s*shutdown\s*$'
+        checks:
+          - kind: vrp
+            match: exact
+            lines:
+              - port-security enable
+        fix: |
+          interface ${if}
+           port-security enable
+
+  # ==================== MAC限制 (CE系列) ====================
+  - id: SW-PS-02
+    title: 非trunk在用端口必须配置MAC数量限制
+    device_type: 交换机
+    platforms: [ce-series]
+    severity: high
+    sections:
+      - context: interface
+        selector:
+          - '10GE*'
+          - '25GE*'
+          - '40GE*'
+          - '100GE*'
+          - 'GE*'
+        preconds:
+          exclude:
+            - 'port link-type trunk'
+            - 'eth-trunk'
+            - '^\s*shutdown\s*$'
+        checks:
+          - kind: vrp
+            match: regex
+            lines:
+              - '^\s*mac-limit\b'
+        fix: |
+          interface ${if}
+           mac-limit maximum 10 action alarm
+          commit

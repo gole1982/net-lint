@@ -1,0 +1,44 @@
+# ============================================================
+# .dockerignore — 排除不需要进入镜像的文件
+# ============================================================
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# ---- Git ----
+.git/
+.gitignore
+
+# ---- 运行时输出 ----
+remediation_report.md
+baseline_report.xlsx
+*.tar.gz
+
+# ---- runtime/ 和 vendor/ (容器内用 python:3.12-slim + pip, 不需要) ----
+runtime/
+vendor/
+
+# ---- vendor_web/ (临时目录, 如有) ----
+vendor_web/
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- 打包脚本 ----
+pack.sh
+pack_python.py
+
+# ---- Docker 自身文件 ----
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# ---- 文档(可选, 不进镜像) ----
+# README.txt  # 保留, 镜像内提供帮助信息
