@@ -41,6 +41,10 @@ def check(fid, name, cond, detail=""):
     else:
         FAILED.append(f"{tag} {name} -> {detail}")
         print(f"  [FAIL] {tag} {name}" + (f"  -> {detail}" if detail else ""))
+        # GitHub Actions 会把 ::error:: 解析为注解, PR 上可直接定位到失败用例;
+        # 同时输出到 stderr, 便于在普通 CI 中排查。
+        print(f"::error::{tag} {name}" + (f" -> {detail}" if detail else ""),
+              file=sys.stderr)
 
 
 def skip(fid, name, reason):
@@ -413,9 +417,39 @@ def main():
         print(f"失败 {len(FAILED)}:")
         for f in FAILED:
             print("  -", f)
+        _write_summary()
         return 1
     print("全部通过")
+    _write_summary()
     return 0
+
+
+def _write_summary():
+    """把结果写入 GitHub Actions job summary(存在该环境变量时)"""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = [
+        "## 回归测试结果",
+        "",
+        f"- 通过: **{len(PASSED)}**",
+        f"- 失败: **{len(FAILED)}**",
+        f"- 跳过: **{len(SKIPPED)}**",
+        "",
+    ]
+    if FAILED:
+        lines += ["### 失败用例", ""]
+        lines += [f"- {f}" for f in FAILED]
+        lines.append("")
+    if SKIPPED:
+        lines += ["### 跳过用例", ""]
+        lines += [f"- {s}" for s in SKIPPED]
+        lines.append("")
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

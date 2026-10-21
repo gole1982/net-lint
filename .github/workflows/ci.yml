@@ -83,8 +83,11 @@ jobs:
       - name: 工作区不得出现明文口令
         run: |
           # 审计报告与回归测试会引用该口令作为缺陷证据, 属预期内容, 排除在外
-          if git grep -I -n 'Huawei@123' -- . ':(exclude)docs/**' ':(exclude)tests/**' ; then
+          # (不用 git pathspec magic, 排除语义在不同 git 版本下不一致)
+          hits=$(git grep -I -n 'Huawei@123' -- . | grep -v -E '^(docs|tests)/' || true)
+          if [ -n "$hits" ]; then
             echo "::error::检测到明文口令"
+            echo "$hits"
             exit 1
           fi
           echo "OK: 未检出明文口令"
@@ -122,17 +125,35 @@ jobs:
       - name: Web 容器启动与接口可达
         run: |
           docker compose up -d web
+          ready=0
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:8080/api/system/info >/dev/null 2>&1; then
+              ready=1
               break
             fi
             sleep 2
           done
+          echo "::group::容器状态"
+          docker compose ps
+          echo "::endgroup::"
+          if [ "$ready" != "1" ]; then
+            echo "::error::Web 容器 60s 内未就绪"
+            docker compose logs web
+            exit 1
+          fi
           curl -fsS http://localhost:8080/api/system/info
           echo ""
           # /api 必须命中路由而不是被静态挂载吞掉 (A12)
-          curl -fsS http://localhost:8080/api | tee /tmp/api_root.json
-          grep -q '"version"' /tmp/api_root.json
+          if ! curl -fsS http://localhost:8080/api | tee /tmp/api_root.json; then
+            echo "::error::GET /api 不可达"
+            docker compose logs web
+            exit 1
+          fi
+          if ! grep -q '"version"' /tmp/api_root.json; then
+            echo "::error::GET /api 未返回版本信息"
+            exit 1
+          fi
+          echo "OK: /api 与 /api/system/info 均可达"
 
       - name: 容器日志
         if: failure()

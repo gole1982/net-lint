@@ -16,7 +16,11 @@ __pycache__/
 # ---- 运行时输出 ----
 remediation_report.md
 baseline_report.xlsx
+output/
 *.tar.gz
+
+# ---- 含明文口令的设备清单(运行时由 volume 挂载提供) ----
+devices.csv
 
 # ---- runtime/ 和 vendor/ (容器内用 python:3.12-slim + pip, 不需要) ----
 runtime/
