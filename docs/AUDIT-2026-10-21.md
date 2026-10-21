@@ -1,0 +1,337 @@
+# VRP 基线检查工具 v2.2 — 代码审计报告与修复记录
+
+| 项目 | 内容 |
+|---|---|
+| 审计对象 | 华为 VRP 基线检查工具 v2.2 |
+| 审计基线 | commit `35cfddd` (v2.2: 三层架构+FastAPI+Docker容器化, 2026-10-16) |
+| 修复标签 | `audit-v2.2-20261021`（本次修复的稳定参照点，用于后续比照） |
+| 审计范围 | `core/` `api/` `cli.py` `vrp_baseline.py` `web/` + 部署配置（排除 `vendor/` `runtime/` 第三方代码） |
+| 一方代码规模 | 约 2010 行 Python（21 个模块） |
+| 审计日期 | 2026-10-21 |
+| 审计方法 | 静态审阅 + 构造真实 VRP 配置实跑复现 + 端到端离线自检 |
+| 结论 | 发现 **18 项缺陷**（严重 4 / 高 5 / 中 5 / 低 4），已全部修复并回归验证 |
+
+---
+
+## 一、结论摘要
+
+| 编号 | 严重度 | 模块 | 问题 | 状态 |
+|---|---|---|---|---|
+| A01 | 🔴 严重 | `core/builtin_checks.py` | 策略链检查在"非全局应用"时抛 `AttributeError`，整台设备结果被丢弃 | 已修复 |
+| A02 | 🔴 严重 | `core/config_parser.py` | `context: system` 只检查首个分段，7/12 条规则恒定误判，含**漏报** | 已修复 |
+| A03 | 🔴 严重 | `core/config_parser.py` | regex 模式缺 `MULTILINE`，行级正则永远匹配不到 | 已修复 |
+| A14 | 🔴 严重 | `core/builtin_checks.py` | DHCP 链贪婪 `[^;]*` 吞掉多行规则，`SW-DHCP-02` 永不可能通过 | 已修复 |
+| A04 | 🟠 高 | `core/config_parser.py` | `pass_preconds` 缺 `MULTILINE`，`shutdown` 排除完全失效 | 已修复 |
+| A05 | 🟠 高 | `core/collector.py` | 抓取配置超时时静默使用截断配置 | 已修复 |
+| A15 | 🟠 高 | `core/reporter.py` | Excel 中文表头查英文键，除 IP 外所有列为空 | 已修复 |
+| A16 | 🟠 高 | `snapshots/10.10.1.11.cfg` | 样例分段格式与解析器不匹配，离线自检跑不出自身声明的预期 | 已修复 |
+| A06 | 🟡 中 | `api/routes/tasks.py` | 报告下载返回全局共享文件，跨任务串号 | 已修复 |
+| A07 | 🟡 中 | `docker-compose.yml` | `profile.yaml` 只读挂载，Web 端规则开关/变量编辑全部 500 | 已修复 |
+| A08 | 🟡 中 | `cli.py` `api/task_manager.py` | 报告写入项目根目录，Docker 挂载的 `output` 卷永远为空 | 已修复 |
+| A09 | 🟡 中 | `devices.csv` | 明文口令入库并随包分发 | 已修复 |
+| A10 | 🟡 中 | `api/app.py` | 通配 CORS + 凭据 + API 无鉴权 | 已修复 |
+| A17 | 🟡 中 | `vrp_baseline.py` | 向后兼容入口在 GBK 环境直接崩溃 | 已修复 |
+| A11 | 🟢 低 | `api/routes/profile.py` | Web 编辑一次即清空 `profile.yaml` 全部注释 | 已修复 |
+| A12 | 🟢 低 | `api/app.py` | `GET /api` 被静态挂载吞掉，端点不可达 | 已修复 |
+| A13 | 🟢 低 | `api/routes/tasks.py` | 未使用的导入 | 已修复 |
+| A18 | 🟢 低 | 多模块 | `vendor/` 插到 `sys.path` 最前，遮蔽已安装同名包 | 已修复 |
+
+> **A14 / A15 / A16 / A17** 是在修复过程中经端到端自检**新发现**的缺陷，均已一并修复并补充回归用例。
+
+---
+
+## 二、缺陷详述
+
+### 🔴 A01 — 策略链检查崩溃，整台设备结果被丢弃
+
+**现象**　设备策略链完整（ACL → 流分类 → deny 流行为 → 流策略）但按接口绑定而非 `traffic-policy X global inbound` 时，引擎抛 `AttributeError: 'list' object has no attribute 'items'`。
+
+**根因**　`split_blocks()` 返回列表，但 `_in_use_ports()` 按字典遍历 `blocks.items()`；同一参数在 `vlan1_check` 中又按列表使用。两个内置检查对同一参数期望不一致。
+
+**影响**　`cli.py` 的 `try` 把 `run_all()` 也包在内，异常被捕获后该设备记为"采集失败"，**该设备所有其他基线不合规项一并丢失**；Web 端标记 `status: error` + `findings: []`。受影响规则 `SW-IPV6-01`、`SW-DHCP-02`（均 severity: high）。
+
+**修复**　统一 `blocks` 为列表语义，新增 `_view_name()` 统一解析视图名。
+
+**验证**　`[A01]` 4 条用例：非全局应用不再崩溃并正确报出缺口端口；全局应用判定通过。
+
+---
+
+### 🔴 A02 — `context: system` 只检查首个分段
+
+**现象**　合规设备被报 NTP/SNMP 不合规；开启 `dhcp enable` 的设备反而检不出。
+
+**根因**　`select_targets()` 对 system 上下文固定返回 `blocks[0]`。但真实 `display current-configuration` 按 `^#\s*$` 切分后，**第 0 段是 banner + sysname**，全局命令（`snmp-agent` / `ntp-service` / `dhcp enable`）各自成段。`config_parser.py` 原注释"返回 [全局段, 接口段1, ...]"固化了错误假设。
+
+**影响**　12 条规则中 7 条受影响：
+- `SW-NTP-01` `SW-SNMP-01/02/03`（high）、`SW-SNMP-04/05`（suggest）：**恒定误报**
+- `SW-DHCP-01`（high，`kind: not`）：**永远不触发 → 安全基线"禁止启用 DHCP"实际完全失效**
+
+**修复**　system 上下文合并所有非接口段（`_INTERFACE_HEAD_RE` 排除 `interface` 视图）。
+
+**验证**　`[A02]` 3 条用例，含反向漏报用例。
+
+---
+
+### 🔴 A03 / 🟠 A04 — 匹配缺 MULTILINE（同一根因）
+
+**现象**　`SW-PS-02`（CE 系列，`match: regex`，`'^\s*mac-limit\b'`）在**任何**合规接口上都判不合规；`SW-PS-01` 把 `shutdown` 端口也标记出来。
+
+**根因**　`compile_tpl()` 的 regex 分支用 `re.compile(pat)`，`^` 只能匹配整个配置块的**第一行**；`pass_preconds()` 用 `re.search(p, block)` 同样无多行语义。配置块是多行文本，规则里的 `^`/`$` 表达的是**行首/行尾**而非块首/块尾。
+
+**影响**　所有 regex 模式规则在多行块上恒定误报；前提条件中的行级排除（如 `^\s*shutdown\s*$`）全部失效，导致已下线的端口仍被要求配置安全。
+
+**修复**　`re.compile(pat, re.MULTILINE)`；`re.search(p, block, re.MULTILINE)`。
+
+**验证**　`[A03]` 3 条 + `[A04]` 2 条用例。
+
+---
+
+### 🔴 A14 — DHCP 链贪婪匹配
+
+**现象**　`SW-DHCP-02` 在任何设备上都不可能通过，连随包样例（头部明确写"✓ DHCP策略链完整"）都判 FAIL。
+
+**根因**　`r"deny udp[^;]*destination-port eq (67|68|...)"` 中 `[^;]*` 贪婪且可跨行，把同一 ACL 内所有规则一次吞掉，只捕获到最后一个端口，`norm` 永远只有 1 个元素，恒不等于 `{"67","68"}`。
+
+**修复**　改为 `[^;\r\n]*`，不跨行匹配。
+
+**验证**　`[A14]` 3 条用例（仅 67 / 仅 68 / 两者同时）。
+
+---
+
+### 🟠 A05 — 抓取超时静默截断
+
+**现象**　配置大的设备抓取不完整，审计仍按残缺配置出结论，且残缺配置被写入快照。
+
+**根因**　`telnetlib.expect()` 超时**不抛异常**，只返回 `(-1, None, 已收数据)`；代码丢弃了返回索引。`except TimeoutError` 对此场景不可达。
+
+**修复**　显式检查索引，`< 0` 时抛 `TelnetTimeoutError`；超时上限提为常量 `CONFIG_TIMEOUT`。
+
+**验证**　`[A05]` 用例（静态检查 + 语义约束）。
+
+---
+
+### 🟠 A15 — Excel 汇总列全空
+
+**现象**　`baseline_report.xlsx` 只有 IP 列有值，规则ID / 严重度 / 不合规位置 / 证据全是空白。
+
+**根因**　`str(row_data.get(h.lower(), ""))` 用中文表头（`规则ID`）去查英文键（`rule`），永远取不到。
+
+**修复**　显式列映射 `col_keys = ["ip", "rule", "severity", "target", "evidence"]`。
+
+**验证**　`[A15]` 4 条用例（直接读取生成的 xlsx 校验非空）。
+
+---
+
+### 🟠 A16 — 随包样例格式与解析器不匹配
+
+**现象**　`./run.sh --offline` 离线自检跑不出样例头部自己声明的预期结果（`SW-PS-01`、`SW-VLAN1-01` 检测不出）。
+
+**根因**　样例头部声称"以单独的 `#' 行分段"，实际用空行分段。`split_blocks()` 只认 `#` 行，导致整份配置只被切成 2 段，**没有任何接口块被解析**，接口级规则无从触发。
+
+**修复**　样例改写为真实 VRP 的 `#` 分段格式（含 `!` banner），与 `fetch_telnet` 实际产出一致。
+
+**验证**　`[A16]` 7 条用例，逐条比对样例声明的预期结果。
+
+---
+
+### 🟡 A06 — 报告跨任务串号
+
+**现象**　任务 A 完成后任务 B 运行，下载 A 的报告拿到 B 的内容；并发任务还会同时写同一个 xlsx。
+
+**根因**　`write_report_files()` 固定写 `<项目根>/remediation_report.md`；下载接口解析同样的固定路径，与 `task_id` 无关。
+
+**修复**　按 `output/reports/<task_id>/` 隔离；下载按任务号定位；文件缺失返回 404 而非 500。
+
+**验证**　`[A06]` 4 条用例。
+
+---
+
+### 🟡 A07 / A08 — 部署配置与代码不一致
+
+**A07**　`docker-compose.yml` 以 `:ro` 挂载 `profile.yaml`，而 `_save_profile()` 用 `open(path, "w")` 写入且不捕获 `OSError` → 官方 compose 部署下 **Web 端"规则开关"和"变量编辑"全部 500**。修复：改为读写挂载。
+
+**A08**　`cli.py` 与 `api/task_manager.py` 把项目根目录当 `output_dir`，而 compose 挂载的是 `./data/output:/app/output`，Dockerfile 也创建了 `/app/output` —— **没有任何代码写入它，容器重建即丢报告**。修复：统一写入 `output/`。
+
+**验证**　`[A08]` 用例（报告路径落在 `output/` 下）。
+
+---
+
+### 🟡 A09 — 明文口令入库
+
+**现象**　`devices.csv` 三台设备的 `password` 列均为 `Huawei@123`，且被 git 跟踪；已分发的 `vrp-baseline-v2.2-20261016.tar.gz` 内同样包含。
+
+**修复**　清空口令列；`git rm --cached devices.csv` 取消跟踪；新增 `devices.csv.example` 模板；`.gitignore` 加入 `devices.csv`；`pack.sh` 打包时排除 `devices.csv`。
+
+**验证**　`[A09]` 2 条用例。
+
+---
+
+### 🟡 A10 — 通配 CORS + 无鉴权
+
+**现象**　任意网站可读取本 API 的设备清单（内网 IP、用户名），并 POST `/api/tasks` 驱动服务端 telnet 内网交换机。
+
+**根因**　`allow_origins=["*"]` + `allow_credentials=True` 时，Starlette 会**回显任意请求 Origin** 并带 `Access-Control-Allow-Credentials: true`；且 API 全程无鉴权，容器绑定 `0.0.0.0`。
+
+**修复**　默认关闭跨域（前端与 API 同源，本就不需要）；`VRP_ALLOWED_ORIGINS` 显式白名单；`VRP_API_TOKEN` 可选令牌闸门（`X-API-Token` 头，SSE 走 `?token=`），前端配套输入框。
+
+**验证**　`[A10]` 5 条用例。
+
+---
+
+### 🟡 A17 — 向后兼容入口崩溃
+
+**现象**　Windows 中文环境执行 `python vrp_baseline.py --selfcheck` 直接 `UnicodeDecodeError`。
+
+**根因**　`exec(open(sys.argv[0]).read())` 使用系统默认编码（GBK）解码 UTF-8 源码。
+
+**修复**　显式 `encoding="utf-8"` 并用 `compile()` 执行。
+
+---
+
+### 🟢 A11 — profile 注释被清空
+
+**现象**　Web 端改一次变量，`profile.yaml` 从 56 行/32 条注释变成 21 行/0 条注释。
+
+**根因**　`_save_profile()` 经 `yaml.dump` 回写，注释全部丢失。而该文件被 README 定义为"用户唯一需要编辑的配置文件"，注释承载每个变量/规则的说明。
+
+**修复**　改为**按行定点更新**：只替换被改键的值，保留行尾注释与文件其余内容；写盘采用临时文件 + 原子替换，并**在写盘前回读校验**目标段键值，渲染逻辑出错不会污染用户配置。
+
+**验证**　`[A11]` 9 条用例（含注释数量比对、布尔/列表渲染、prune 语义）。
+
+---
+
+### 🟢 A12 / A13 / A18
+
+- **A12**　`StaticFiles` 挂载在 `"/"` 注册于 `@app.get("/api")` 之前 → 请求 `/api` 先命中 Mount，返回 404。修复：把 `/api` 路由移到挂载之前。
+- **A13**　`api/routes/tasks.py` 未使用的 `BackgroundTasks` / `StreamingResponse` 导入。已清理。
+- **A18**　各模块在导入期 `sys.path.insert(0, vendor)`，会遮蔽已安装的同名包（含 ABI 相关的 `pydantic-core`），使"能否启动"取决于 import 顺序。修复：改为"已安装优先、`vendor/` 兜底"（`sys.path.append`）；离线绿色版通过 `PYTHONPATH=vendor:.` 已让 vendor 优先，行为不变。
+
+---
+
+## 三、修复意图
+
+1. **判定语义必须与配置文本的形态一致**　配置块是多行文本，所有面向"行"的正则（规则 pattern、preconds、触发判定）一律按行匹配；段选择必须覆盖真实的 `#` 分段结构，而不是假设首段即全局段。
+2. **失败必须显式，不能降级为"合规"**　采集超时、配置截断、依赖缺失等异常一律抛出并进入错误分支；任何情况下都不得让残缺数据参与判定并落盘。
+3. **产物必须与身份绑定**　报告按 `task_id` 隔离；快照、报告、配置的输出路径与部署挂载点、文档描述三处对齐。
+4. **默认安全**　跨域默认关闭、鉴权可选但可一键开启；凭据不入库、不进包、不写死在文件里。
+5. **用户可编辑的文件必须可安全编辑**　保留注释、原子写入、写前校验——用户在 Web 界面上的任何一次点击都不应破坏配置文件。
+6. **自检样例必须真的能自检**　随包样例的格式与解析器一致，且其声明的预期结果由自动化用例逐条锁定。
+
+---
+
+## 四、修复目标（修复后系统应保证的性质）
+
+| 编号 | 目标 | 验证方式 |
+|---|---|---|
+| G1 | 合规设备不产生误报 | `[A02]` `[A03]` `[A16]` |
+| G2 | 不合规设备不漏报（含 `dhcp enable`） | `[A02]` 反向用例 |
+| G3 | 任一设备配置不触发引擎异常 | `[A01]` `[A16]` |
+| G4 | 采集失败/超时必须显式报错，不产生截断结论 | `[A05]` |
+| G5 | 报告内容与任务一一对应，格式完整 | `[A06]` `[A15]` |
+| G6 | 部署产物落在声明的路径并随容器持久化 | `[A08]` |
+| G7 | 未经授权的跨域站点无法读取 API 或驱动采集 | `[A10]` |
+| G8 | 仓库与分发包不含明文凭据 | `[A09]` |
+| G9 | 用户编辑配置文件不丢失注释、不损坏文件 | `[A11]` |
+| G10 | 随包样例自检结果与其声明一致 | `[A16]` |
+
+---
+
+## 五、验证记录
+
+```
+回归套件    tests/test_regression.py      52 / 52 通过
+语法检查    21 个一方模块                全部通过
+离线自检    python cli.py --offline      与样例声明逐条吻合
+向后兼容    python vrp_baseline.py       正常
+```
+
+离线自检实际输出（对应样例头部声明）：
+
+```
+✗ SW-VLAN1-01   GigabitEthernet0/0/24: trunk放行VLAN1
+✗ SW-PS-01      GigabitEthernet0/0/3 缺失 port-security enable
+✓ SW-NTP-01 / SW-SNMP-01/02/03 / SW-DHCP-01 / SW-IPV6-01 / SW-DHCP-02
+[建议] SW-SNMP-04
+```
+
+本次改动：20 个文件，+533 / −175。
+
+---
+
+## 六、遗留事项（需运维侧处理）
+
+| 事项 | 说明 |
+|---|---|
+| **轮换已泄露口令** | `Huawei@123` 仍存在于 git 历史与已分发的 `vrp-baseline-v2.2-20261016.tar.gz` 中，清空工作区文件不等于失效。必须改口令；若需彻底清除历史，用 `git filter-repo --path devices.csv --invert-paths` |
+| **`.env` / 凭据传递** | 部署时用 `VRP_PASS_<IP>` 环境变量注入，不要写回 `devices.csv` |
+| **API 令牌** | 对外暴露的部署建议设置 `VRP_API_TOKEN`；前端在"系统信息"页填写 |
+| **旧报告路径** | 修复前的历史报告位于项目根目录，升级后新报告在 `output/`，可手工归档 |
+| **版本号** | 本次为行为修复，建议发布为 v2.3 |
+
+---
+
+## 七、复现与比照方法
+
+本次修复以 **编号 A01–A18** 为审计线索、以 **`tests/test_regression.py`** 为可执行基准。后续任何一次改动都可以按下列方式比照：
+
+### 1. 定位"本次修复"的内容
+
+```bash
+# 本次修复的全部变更
+git show --stat <本次修复commit>
+
+# 按文件逐个查看
+git show <本次修复commit> -- core/config_parser.py
+```
+
+### 2. 以本次修复为基线度量后续漂移
+
+```bash
+# 相对基线的总漂移
+git diff audit-v2.2-20261021..HEAD --stat
+
+# 基线之后的所有提交
+git log --oneline audit-v2.2-20261021..HEAD
+
+# 哪些文件在基线后被反复改动(改动风险最高的区域)
+git log --format= --name-only audit-v2.2-20261021..HEAD | sort | uniq -c | sort -rn
+```
+
+### 3. 追溯某一行的修复出处
+
+```bash
+git blame -L 82,93 core/config_parser.py     # 定位到本次修复的 commit
+git show <上一步得到的SHA>                   # 查看该修复的完整上下文
+```
+
+### 4. 验证后续改动没有回归
+
+```bash
+python tests/test_regression.py             # 全量
+python tests/test_regression.py --core      # 仅引擎层(无需 fastapi)
+python tests/test_regression.py --api       # 仅 API 层
+```
+
+用例编号与缺陷编号一一对应，失败信息会直接标出 `[Axx]`，可立刻回溯到本报告的对应条目。
+
+### 5. 比照两次同类型的修复(例如本次 vs 下一轮审计)
+
+```bash
+git range-diff audit-v2.2-20261021...audit-v2.3-2026xxxx <范围1> <范围2>
+```
+
+`range-diff` 会把两次改动逐块对齐并标出新增/删除/相似，是"这次比上次多修了什么、少修了什么"最直接的视图。
+
+### 6. 审计留痕
+
+本报告与 `tests/test_regression.py` 同处仓库，构成可审计的证据链：
+
+```
+审计报告(本文件)  →  缺陷编号 A01–A18
+        ↓                    ↓
+   修复 commit      tests/test_regression.py 用例编号
+        ↓                    ↓
+    git show          pytest / python 直接执行, 客观复现
+```
+
+**约定**：后续每次审计沿用 `Axx` 编号空间（新问题接续编号），并同步扩充 `tests/test_regression.py`；每轮审计产出同样格式的报告文件，使多轮结果可横向比照。

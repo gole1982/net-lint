@@ -20,6 +20,10 @@ v2.2 新增 Web 前端, 支持浏览器操作全部功能(设备管理/
 ★ 自带 ARM64 Linux Python 3.12 运行时, 目标机器无需安装
   任何Python环境或第三方依赖, 解压即用。
 
+★ 2026-10-21 完成一次全量代码审计, 修复 18 项缺陷(详见
+  docs/AUDIT-2026-10-21.md)。回归测试:
+    python tests/test_regression.py
+
 
 二、文件清单
 ------------------------------------------------------------
@@ -49,8 +53,13 @@ v2.2 新增 Web 前端, 支持浏览器操作全部功能(设备管理/
     app.js               交互逻辑(REST + SSE)
   rules.yaml          规则库(由程序作者维护, 用户不应修改)
   profile.yaml        用户配置(规则开关 + 变量值, 唯一需编辑)
-  devices.csv         设备清单(IP/用户名/密码)
+  devices.csv.example 设备清单模板(复制为 devices.csv 后填写)
+  devices.csv         设备清单(本地文件, 不入库, 勿提交明文口令)
   snapshots/          配置快照目录(在线自动保存, 离线读取)
+  docs/               文档目录
+    AUDIT-2026-10-21.md  代码审计报告与修复记录(18项缺陷)
+  tests/
+    test_regression.py 回归测试(对应审计编号 A01~A18)
   runtime/            独立Python 3.12 aarch64 Linux运行时
     bin/python3.12       Python解释器(aarch64 ELF二进制)
     lib/python3.12/      标准库(含telnetlib, 3.12自带)
@@ -250,10 +259,34 @@ VRP唯一前缀兼容:
 十、输出文件
 ------------------------------------------------------------
 
-  remediation_report.md  — 整改文档(Markdown格式, 按设备分组)
-  baseline_report.xlsx   — Excel汇总表
-                           色标: 红=high 黄=medium 绿=low 蓝=suggest
-  snapshots/<IP>.cfg     — 在线模式自动保存的设备配置快照
+所有报告统一输出到 output/ 目录 (与 docker-compose 的
+./data/output:/app/output 挂载点一致):
+
+  output/remediation_report.md  — 整改文档(Markdown格式, 按设备分组)
+  output/baseline_report.xlsx   — Excel汇总表
+                                  色标: 红=high 黄=medium 绿=low 蓝=suggest
+  output/reports/<task_id>/     — Web 端每个任务的报告(按 task_id 隔离,
+                                  下载接口按任务号取对应文件)
+  snapshots/<IP>.cfg            — 在线模式自动保存的设备配置快照
+
+十之一、Web 服务环境变量
+------------------------------------------------------------
+
+  VRP_API_TOKEN        设置后, 所有 /api 请求须带 X-API-Token 头;
+                      前端可在"系统信息"页填写令牌(存 localStorage)。
+                      不设置则不鉴权, 仅建议在受控内网使用。
+  VRP_ALLOWED_ORIGINS  跨域白名单(逗号分隔)。前端页面由本服务同源提供,
+                      默认不需要跨域; 仅当把前端单独部署到其它域名时才设置。
+
+十之二、设备清单
+------------------------------------------------------------
+
+  devices.csv          本地设备清单, 已加入 .gitignore, 请勿提交明文口令。
+                       首次使用: cp devices.csv.example devices.csv
+  devices.csv.example  随包发布的模板(口令列为空)
+
+  口令优先用环境变量传递, 不写进 CSV:
+     export VRP_PASS_10_10_1_11='你的口令'
 
 
 十一、规则ID速查
