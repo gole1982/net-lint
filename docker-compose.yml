@@ -31,10 +31,12 @@ services:
     ports:
       - "${WEB_PORT:-8080}:8080"
     volumes:
-      # 用户配置文件 (只读挂载)
-      - ./data/devices.csv:/app/devices.csv:ro
-      - ./data/profile.yaml:/app/profile.yaml:ro
+      # 规则库定义: 只读(程序从不修改)
       - ./data/rules.yaml:/app/rules.yaml:ro
+      # 用户配置: 可写(Web 端的规则开关/变量编辑会回写该文件)
+      - ./data/profile.yaml:/app/profile.yaml
+      # 设备清单: 只读(设备增删改走内存存储, 由 Web 端 CRUD 管理)
+      - ./data/devices.csv:/app/devices.csv:ro
       # 可读写目录
       - ./data/snapshots:/app/snapshots
       - ./data/output:/app/output
@@ -43,6 +45,10 @@ services:
       # 设备密码通过环境变量传递 (推荐, 不写入CSV)
       # 格式: VRP_PASS_<IP> (IP中点号替换为下划线)
       # - VRP_PASS_10_10_1_11=your_password
+      # 设置后, Web/API 请求需带 X-API-Token 头
+      # - VRP_API_TOKEN=your_api_token
+      # 前端若单独部署到其它域名, 才需要设置跨域白名单
+      # - VRP_ALLOWED_ORIGINS=https://vrp.example.com
     networks:
       - vrp-net
 
@@ -54,7 +60,6 @@ services:
     entrypoint: ["/app/docker-entrypoint.sh", "cli"]
     volumes:
       - ./data/devices.csv:/app/devices.csv:ro
-      - ./data/profile.yaml:/app/profile.yaml:ro
       - ./data/rules.yaml:/app/rules.yaml:ro
       - ./data/snapshots:/app/snapshots
       - ./data/output:/app/output

@@ -10,7 +10,6 @@ import asyncio
 import logging
 import os
 import sys
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -22,12 +21,24 @@ from .store import task_store, device_store
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
-# vendor 路径
+# vendor 路径 (追加到末尾: 已安装的同名包优先, vendor 仅作离线版兜底)
 _VENDOR_DIR = os.path.join(_PROJECT_ROOT, "vendor")
-if _VENDOR_DIR not in sys.path:
-    sys.path.insert(0, _VENDOR_DIR)
+if os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in sys.path:
+    sys.path.append(_VENDOR_DIR)
+
+# 报告输出根目录(与 docker-compose 的 ./data/output:/app/output 挂载点一致)
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "output")
 
 logger = logging.getLogger("vrp_baseline")
+
+
+def report_dir(task_id: str) -> str:
+    """任务报告目录。
+
+    按 task_id 隔离: 多个任务串行或并发运行时不会互相覆盖报告文件,
+    否则下载历史任务的报告会拿到最新一次任务的内容。
+    """
+    return os.path.join(OUTPUT_DIR, "reports", task_id)
 
 
 def _run_single_device(dev, rules, variables, offline, snapshots_dir, ip_list):
@@ -108,12 +119,10 @@ async def _run_task(task_id, devices, rules, variables, offline, snapshots_dir, 
     results = {}
     cfg_map = {}
 
-    loop = asyncio.get_event_loop()
-
     # 使用线程池并发采集
     workers = min(len(devices), 10) if devices else 1
+    loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        loop = asyncio.get_event_loop()
         futures = {
             loop.run_in_executor(
                 pool, _run_single_device,
@@ -157,8 +166,8 @@ async def _run_task(task_id, devices, rules, variables, offline, snapshots_dir, 
     # 生成报告数据
     report_data = build_report_data(results, devices, variables)
 
-    # 写报告文件
-    write_report_files(report_data, base_dir)
+    # 写报告文件(按 task_id 隔离, 避免并发任务互相覆盖)
+    write_report_files(report_data, report_dir(task_id))
 
     # 快照保存(仅在线模式)
     if not offline:

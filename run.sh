@@ -20,9 +20,9 @@
 #   若 runtime/ 目录不存在, 可改为系统 python3 运行(需自行安装依赖)
 #
 # 输出:
-#   remediation_report.md  整改文档(Markdown格式)
-#   baseline_report.xlsx   Excel汇总表(含色标)
-#   snapshots/<IP>.cfg    在线模式自动保存的设备配置快照
+#   output/remediation_report.md  整改文档(Markdown格式)
+#   output/baseline_report.xlsx   Excel汇总表(含色标)
+#   snapshots/<IP>.cfg            在线模式自动保存的设备配置快照
 # =============================================================================
 
 cd "$(dirname "$0")"

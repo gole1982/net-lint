@@ -11,16 +11,14 @@ GET    /api/tasks/{id}/download/{fmt}  下载报告文件(md/xlsx)
 
 import os
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 
 from ..schemas import TaskCreate, TaskOut
 from ..store import task_store
-from ..task_manager import create_and_run_task
+from ..task_manager import create_and_run_task, report_dir
 
 router = APIRouter(prefix="/api/tasks", tags=["任务管理"])
-
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @router.post("", response_model=TaskOut)
@@ -77,14 +75,18 @@ async def download_report(task_id: str, fmt: str):
     if t["status"] != "done":
         raise HTTPException(status_code=400, detail="任务尚未完成")
 
+    # 报告按 task_id 存放, 保证下载到的确实是该任务的报告
+    fname = "remediation_report.md" if fmt == "md" else "baseline_report.xlsx"
+    path = os.path.join(report_dir(task_id), fname)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"报告文件不存在: {fname}")
+
     if fmt == "md":
-        path = os.path.join(_PROJECT_ROOT, "remediation_report.md")
         return FileResponse(path, media_type="text/markdown",
-                            filename="remediation_report.md")
+                            filename=fname)
     else:
-        path = os.path.join(_PROJECT_ROOT, "baseline_report.xlsx")
         return FileResponse(
             path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename="baseline_report.xlsx",
+            filename=fname,
         )

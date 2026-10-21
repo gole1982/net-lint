@@ -13,8 +13,10 @@
 #   api/                      FastAPI接口层
 #   web/                      前端静态资源
 #   rules.yaml / profile.yaml 规则库 + 用户配置
-#   devices.csv               设备清单(示例)
+#   devices.csv.example      设备清单模板(不含口令, 部署后复制为 devices.csv)
 #   snapshots/                配置快照(含sample.cfg)
+#   docs/                     文档(含审计报告)
+#   tests/                    回归测试(python tests/test_regression.py)
 #   vendor/                   纯Python依赖 + aarch64 C扩展
 #   runtime/                  独立Python 3.12 aarch64 Linux运行时
 #   run.sh / run_web.sh       启动脚本
@@ -44,6 +46,7 @@ find . -name ".pytest_cache" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # 清理运行时生成文件
 rm -f remediation_report.md baseline_report.xlsx 2>/dev/null || true
+rm -rf output 2>/dev/null || true
 
 # 构建排除列表
 EXCLUDES=(
@@ -54,9 +57,12 @@ EXCLUDES=(
   --exclude=".pytest_cache"
   --exclude="remediation_report.md"
   --exclude="baseline_report.xlsx"
+  --exclude="output"
   --exclude="pack.sh"
   --exclude="*.tar.gz"
   --exclude="vendor_web"
+  # devices.csv 可能含明文口令, 不进包; 只发模板
+  --exclude="devices.csv"
 )
 
 if [ "$1" = "--no-runtime" ]; then

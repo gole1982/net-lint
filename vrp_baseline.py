@@ -26,4 +26,7 @@ import sys
 
 # 透传所有参数到 cli.py
 sys.argv[0] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli.py")
-exec(open(sys.argv[0]).read())
+# 必须显式指定 utf-8: Windows 中文环境默认编码是 GBK,
+# 直接 open().read() 会抛 UnicodeDecodeError, 导致向后兼容入口不可用。
+with open(sys.argv[0], encoding="utf-8") as _f:
+    exec(compile(_f.read(), sys.argv[0], "exec"))

@@ -14,13 +14,10 @@ api.app — FastAPI 应用入口
 ================================================================
 """
 
+import hmac
 import logging
 import os
 import sys
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 # 路径注入 (离线绿色版用vendor, Docker容器用pip安装的包)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,7 +25,14 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 _VENDOR_DIR = os.path.join(_PROJECT_ROOT, "vendor")
 if os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in sys.path:
-    sys.path.insert(0, _VENDOR_DIR)
+    # 追加到 sys.path 末尾: 已安装的同名包优先, vendor/ 仅作为离线绿色版兜底。
+    # 离线绿色版通过 PYTHONPATH=vendor:. 已经让 vendor 优先, 行为不变。
+    sys.path.append(_VENDOR_DIR)
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 # 日志配置
 logging.basicConfig(level=logging.INFO)
@@ -51,14 +55,47 @@ app = FastAPI(
     version="2.2",
 )
 
-# CORS 允许前端跨域
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---- CORS ----
+# 前端页面由本应用在 "/" 提供, 同源访问本来就不需要 CORS, 因此默认关闭跨域。
+# 只有把前端单独部署到其它域名时, 才通过 VRP_ALLOWED_ORIGINS 指定白名单:
+#   VRP_ALLOWED_ORIGINS=https://vrp.example.com
+# 注意: 不要使用 allow_origins=["*"] + allow_credentials=True。该组合下
+# Starlette 会回显任意请求 Origin 并带 Access-Control-Allow-Credentials,
+# 任意站点都能读取本 API 的设备清单并驱动服务端 telnet 内网交换机。
+_allowed_origins = [
+    o.strip() for o in os.environ.get("VRP_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+]
+if _allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info(f"CORS 白名单: {_allowed_origins}")
+else:
+    logger.info("CORS: 未配置 VRP_ALLOWED_ORIGINS, 仅允许同源访问")
+
+
+# ---- 可选 API 令牌鉴权 ----
+# 设置 VRP_API_TOKEN 后, 所有 /api 请求必须携带 X-API-Token 头。
+# 未设置时不鉴权(便于内网/离线直接使用), 但启动日志会给出提示。
+_API_TOKEN = os.environ.get("VRP_API_TOKEN", "").strip()
+
+
+@app.middleware("http")
+async def api_token_guard(request, call_next):
+    """API 令牌校验中间件"""
+    if _API_TOKEN and request.url.path.startswith("/api"):
+        token = request.headers.get("X-API-Token", "")
+        if not token:
+            # EventSource 无法自定义请求头, SSE 允许用查询参数传递
+            token = request.query_params.get("token", "")
+        if not token or not hmac.compare_digest(token, _API_TOKEN):
+            return JSONResponse({"detail": "无效的 API 令牌"}, status_code=401)
+    return await call_next(request)
 
 # 注册路由
 from .routes.devices import router as devices_router
@@ -119,12 +156,15 @@ async def startup_event():
             logger.warning(f"加载 devices.csv 失败: {e}")
 
 
+# ---- API 根路径 ----
+# 必须注册在 StaticFiles 挂载("/")之前: 挂在 "/" 的 Mount 会匹配所有路径,
+# 若先注册, /api 会被静态文件接管并返回 404。
+@app.get("/api")
+async def api_root():
+    return {"name": "华为VRP基线检查工具", "version": "2.2", "docs": "/docs"}
+
+
 # ---- 前端静态文件 ----
 _web_dir = os.path.join(_PROJECT_ROOT, "web")
 if os.path.isdir(_web_dir):
     app.mount("/", StaticFiles(directory=_web_dir, html=True), name="web")
-
-
-@app.get("/api")
-async def api_root():
-    return {"name": "华为VRP基线检查工具", "version": "2.2", "docs": "/docs"}

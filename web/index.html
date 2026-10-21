@@ -91,6 +91,16 @@
         <h2>系统信息</h2>
         <button onclick="runSelfCheck()" class="btn btn-primary">环境自检</button>
       </div>
+      <div class="info-panel">
+        <p><strong>API 令牌</strong>: 服务端设置环境变量 <code>VRP_API_TOKEN</code> 时,
+           在此填入令牌以便访问 API (保存在浏览器 localStorage)。留空表示服务端未启用鉴权。</p>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input id="api-token" type="password" placeholder="API 令牌 (可留空)"
+                 style="flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" />
+          <button onclick="saveApiToken()" class="btn btn-secondary">保存</button>
+          <button onclick="clearApiToken()" class="btn btn-secondary">清除</button>
+        </div>
+      </div>
       <div id="system-info" class="info-panel"></div>
     </section>
   </main>

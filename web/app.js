@@ -3,13 +3,39 @@
 // ============================================================
 
 const API = "";
+const TOKEN_KEY = "vrp_api_token";
+
+// ---- API 令牌 ----
+function getToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+
+function setToken(t) {
+  try {
+    if (t) localStorage.setItem(TOKEN_KEY, t);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch (e) { /* 隐私模式下 localStorage 不可用, 忽略 */ }
+}
+
+function saveApiToken() {
+  const el = document.getElementById("api-token");
+  setToken(el ? el.value.trim() : "");
+  alert("API 令牌已保存");
+}
+
+function clearApiToken() {
+  setToken("");
+  const el = document.getElementById("api-token");
+  if (el) el.value = "";
+  alert("API 令牌已清除");
+}
 
 // ---- 通用工具 ----
 async function api(path, options = {}) {
-  const res = await fetch(API + path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const token = getToken();
+  if (token) headers["X-API-Token"] = token;
+  const res = await fetch(API + path, { ...options, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || "API错误");
@@ -147,7 +173,9 @@ async function importCSV(e) {
   const formData = new FormData();
   formData.append("file", file);
   try {
-    const res = await fetch("/api/devices/import", { method: "POST", body: formData });
+    const token = getToken();
+    const headers = token ? { "X-API-Token": token } : {};
+    const res = await fetch("/api/devices/import", { method: "POST", body: formData, headers });
     if (!res.ok) throw new Error("导入失败");
     const data = await res.json();
     alert(`导入成功: ${data.count} 台设备`);
@@ -242,9 +270,11 @@ async function startTask(offline) {
     document.getElementById("progress-text").textContent = "0%";
     document.getElementById("progress-detail").textContent = "等待开始...";
 
-    // SSE 监听进度
+    // SSE 监听进度 (EventSource 无法自定义请求头, 令牌通过查询参数传递)
     if (_sseSource) _sseSource.close();
-    _sseSource = new EventSource(`/api/sse/${task.task_id}`);
+    const _tok = getToken();
+    const _q = _tok ? `?token=${encodeURIComponent(_tok)}` : "";
+    _sseSource = new EventSource(`/api/sse/${task.task_id}${_q}`);
     _sseSource.onmessage = (e) => {
       const data = JSON.parse(e.data);
       const pct = Math.round((data.progress || 0) * 100);
@@ -329,6 +359,8 @@ async function loadTaskResults(taskId) {
 
 // ---- 系统信息 ----
 async function loadSystemInfo() {
+  const tokEl = document.getElementById("api-token");
+  if (tokEl && !tokEl.value) tokEl.value = getToken();
   try {
     const info = await apiJSON("/api/system/info");
     document.getElementById("system-info").innerHTML = `

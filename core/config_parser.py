@@ -12,6 +12,9 @@ import re
 
 from .models import VAR_RE
 
+# 接口视图段首行特征。用于把 system 上下文(全局配置)与接口上下文区分开。
+_INTERFACE_HEAD_RE = re.compile(r"^interface\s+\S+")
+
 
 def split_blocks(cfg):
     """VRP display current-configuration 按 '#' 分段
@@ -62,7 +65,10 @@ def compile_tpl(line, match_mode, variables):
     if match_mode == "exact":
         compiled = re.compile(r"(?m)^\s*" + pat + r"\s*$")
     else:
-        compiled = re.compile(pat)
+        # regex 模式同样按"行"匹配。配置块是多行文本, 规则里的 ^/$ 表达的是
+        # 行首/行尾而非块首/块尾, 缺少 MULTILINE 时 ^ 只能匹配整个块的第一行,
+        # 导致 "^\s*mac-limit\b" 这类行级正则永远匹配不到。
+        compiled = re.compile(pat, re.MULTILINE)
 
     _tpl_cache[cache_key] = compiled
     return compiled
@@ -70,13 +76,23 @@ def compile_tpl(line, match_mode, variables):
 
 def select_targets(sec, blocks):
     """根据上下文和选择器选出候选配置块
-    system -> 返回 {system: 全局块}
+    system -> 返回 {system: 所有非接口配置段合并后的文本}
     interface/其他 -> 返回 {视图名: 块文本}
     """
     if sec.context == "system":
-        return {"system": blocks[0]} if blocks else {}
+        if not blocks:
+            return {}
+        # VRP 'display current-configuration' 按 '^#\s*$' 分段, 实际结构为:
+        #   第 0 段 = banner + sysname
+        #   全局命令 (snmp-agent / ntp-service / dhcp enable ...) 各自成段
+        #   接口视图也各自成段
+        # 因此 system 上下文必须合并"所有非接口段", 只取 blocks[0] 只能拿到
+        # banner, 任何全局命令检查都会恒定失败。
+        return {"system": "\n".join(
+            b for b in blocks if not _INTERFACE_HEAD_RE.match(b)
+        )}
     out = {}
-    for b in blocks[1:]:
+    for b in blocks:
         lines_b = b.splitlines()
         if not lines_b:
             continue
@@ -96,9 +112,9 @@ def pass_preconds(block, pre):
     """前提条件过滤: include全部命中 AND exclude全部不命中"""
     pre = pre or {}
     for p in pre.get("include", []):
-        if not re.search(p, block):
+        if not re.search(p, block, re.MULTILINE):
             return False
     for p in pre.get("exclude", []):
-        if re.search(p, block):
+        if re.search(p, block, re.MULTILINE):
             return False
     return True

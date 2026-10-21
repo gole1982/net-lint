@@ -13,6 +13,18 @@ __pycache__/
 # ---- 运行时生成的报告 ----
 remediation_report.md
 baseline_report.xlsx
+output/
+
+# ---- 设备配置快照 ----
+# 快照含设备全量配置, 属敏感资产, 默认不入库;
+# 仅保留随包发布的脱敏样例。
+snapshots/*
+!snapshots/10.10.1.11.cfg
+!snapshots/sample.cfg
+
+# ---- 含明文口令的设备清单 ----
+# 模板见 devices.csv.example, 本地复制为 devices.csv 后填写
+devices.csv
 
 # ---- 打包产物 ----
 *.tar.gz

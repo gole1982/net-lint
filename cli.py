@@ -20,10 +20,12 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---- vendor 路径注入 (离线绿色版用vendor, Docker容器用pip安装的包) ----
+# 追加到 sys.path 末尾: 已安装的同名包优先, vendor 仅作离线版兜底。
+# 离线绿色版通过 PYTHONPATH=vendor:. 已经让 vendor 优先, 行为不变。
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _vendor_dir = os.path.join(_BASE_DIR, "vendor")
 if os.path.isdir(_vendor_dir) and _vendor_dir not in sys.path:
-    sys.path.insert(0, _vendor_dir)
+    sys.path.append(_vendor_dir)
 
 # ---- 日志配置 ----
 logger = logging.getLogger("vrp_baseline")
@@ -71,6 +73,7 @@ def run(offline=False):
     rules_path = os.path.join(base_dir, "rules.yaml")
     devices_path = os.path.join(base_dir, "devices.csv")
     snapshots_dir = os.path.join(base_dir, "snapshots")
+    output_dir = os.path.join(base_dir, "output")
 
     # 加载 profile
     profile = load_profile(profile_path)
@@ -88,6 +91,12 @@ def run(offline=False):
     logger.info(f"启用规则: {len(active_rules)} 条")
 
     # 加载设备清单
+    if not os.path.exists(devices_path):
+        logger.error(
+            f"缺少设备清单: {devices_path}\n"
+            f"请复制 devices.csv.example 为 devices.csv 并填写设备信息"
+        )
+        raise SystemExit(1)
     devices = load_devices(devices_path)
 
     # 检查凭证完整性
@@ -133,7 +142,7 @@ def run(offline=False):
     report_data = build_report_data(results, devices, variables)
 
     # 写报告文件
-    write_report_files(report_data, base_dir)
+    write_report_files(report_data, output_dir)
 
     # 快照保存(仅在线模式)
     if not offline:

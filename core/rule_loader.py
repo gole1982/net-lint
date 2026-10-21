@@ -10,9 +10,29 @@ import logging
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor"))
+_VENDOR_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor"
+)
 
-import yaml
+
+def _import_yaml():
+    """导入 PyYAML: 优先已安装的包, 缺失时回退到 vendor/(离线绿色版)。
+
+    这里刻意不在导入期把 vendor/ 插到 sys.path 最前面: 那样会遮蔽已安装的
+    同名包(含带 C 扩展的 pydantic-core), 使"能否启动"取决于 import 顺序。
+    离线绿色版通过 PYTHONPATH=vendor:. 已经让 vendor 优先, 不受影响。
+    """
+    try:
+        import yaml
+        return yaml
+    except ImportError:
+        if os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in sys.path:
+            sys.path.append(_VENDOR_DIR)
+        import yaml
+        return yaml
+
+
+yaml = _import_yaml()
 
 from .models import Rule, Section, Check, VAR_RE
 

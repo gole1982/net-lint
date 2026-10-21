@@ -19,6 +19,9 @@ VRP适配特性:
 import os
 import re
 
+# 抓取 display current-configuration 的等待上限(秒)
+CONFIG_TIMEOUT = 120
+
 # Python 3.12 (runtime) 自带 telnetlib; 3.13+ 移除后离线模式不受影响
 try:
     import telnetlib
@@ -132,7 +135,15 @@ def fetch_telnet(dev):
 
         # 抓取配置
         tn.write(b"display current-configuration\r\n")
-        _, _, data = tn.expect([prompt_re.encode()], timeout=120)
+        idx, _, data = tn.expect([prompt_re.encode()], timeout=CONFIG_TIMEOUT)
+        if idx < 0:
+            # telnetlib.expect 超时不会抛异常, 只返回 (-1, None, 已收到的部分数据)。
+            # 若不显式判定, 会拿截断配置去做基线判定并写入快照, 导致缺失部分被
+            # 误判为"合规", 且离线重跑会复现同样的错误结果。
+            raise TelnetTimeoutError(
+                f"{host}: 抓取配置超时({CONFIG_TIMEOUT}s), "
+                f"配置可能不完整(已收 {len(data)} 字节)"
+            )
 
         tn.write(b"quit\r\n")
         tn.close()

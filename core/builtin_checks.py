@@ -23,10 +23,25 @@ def _acl_blocks(cfg):
     return out
 
 
+def _view_name(block):
+    """从配置块首行解析视图名
+    'interface GigabitEthernet0/0/1' -> 'GigabitEthernet0/0/1'
+    'traffic classifier c1'            -> 'c1'
+    """
+    lines = block.splitlines()
+    if not lines:
+        return ""
+    parts = lines[0].split(None, 1)
+    return parts[1] if len(parts) > 1 else ""
+
+
 def _in_use_ports(blocks):
-    """返回 (在用物理口集合, 成员->Eth-Trunk映射)"""
+    """返回 (在用物理口集合, 成员->Eth-Trunk映射)
+    blocks: split_blocks() 返回的列表, 每项为一个配置块文本
+    """
     ports, m2t = set(), {}
-    for name, body in blocks.items():
+    for body in blocks:
+        name = _view_name(body)
         if PHYS.match(name) and not re.search(r"(?m)^\s*shutdown\s*$", body):
             ports.add(name)
             t = re.search(r"(?m)^\s+eth-trunk (\d+)", body)
@@ -99,11 +114,12 @@ def trace_chain(cfg, blocks, rule_hit_fn):
     # 逐接口检查覆盖度
     ports, m2t = _in_use_ports(blocks)
     applied_names = set()
-    for name, block in blocks.items():
+    for body in blocks:
+        name = _view_name(body)
         if not PHYS.match(name):
             continue
         m = re.search(
-            r"(?m)^\s+traffic-policy (\S+) inbound", block
+            r"(?m)^\s+traffic-policy (\S+) inbound", body
         )
         if m and m.group(1) in pols:
             applied_names.add(name)
@@ -134,9 +150,11 @@ def ipv6_deny_chain(cfg, blocks, variables):
 # --- DHCP阻断(DORA双向: UDP 67+68) ---
 def dhcp_deny_chain(cfg, blocks, variables):
     def hit(body):
+        # [^;\r\n]* 不能跨行: 贪婪的 [^;]* 会把同一 ACL 内所有规则一次吞掉,
+        # 只捕获到最后一个端口, 导致 67/68 双向 deny 永远判定为不满足。
         found = set(
             re.findall(
-                r"deny udp[^;]*destination-port eq (67|68|bootps|bootpc)",
+                r"deny udp[^;\r\n]*destination-port eq (67|68|bootps|bootpc)",
                 body,
             )
         )
@@ -149,13 +167,18 @@ def dhcp_deny_chain(cfg, blocks, variables):
 
 # --- VLAN1禁用 ---
 def vlan1_check(cfg, blocks, variables):
-    evid = []
-    for b in blocks[1:]:
-        head = b.splitlines()[0]
-        name = head.split(None, 1)[1] if head.startswith("interface") else ""
+    evid = []      # 人类可读的证据描述
+    targets = []   # 涉及的接口名(用于定位与整改命令渲染)
+    for b in blocks:
+        head = b.splitlines()[0] if b.splitlines() else ""
+        if not head.startswith("interface"):
+            continue
+        name = _view_name(b)
 
         if name == "Vlanif1":
             evid.append("存在 interface Vlanif1")
+            targets.append(name)
+            continue
 
         if not PHYS.match(name) or re.search(r"(?m)^\s*shutdown\s*$", b):
             continue
@@ -165,19 +188,24 @@ def vlan1_check(cfg, blocks, variables):
             m = re.search(r"(?m)^\s+port trunk allow-pass vlan (.+)$", b)
             if not m:
                 evid.append(f"{name}: trunk未显式裁剪, 默认放行VLAN1")
+                targets.append(name)
             elif _vlan_contains_1(m.group(1)):
                 evid.append(f"{name}: trunk放行VLAN1")
+                targets.append(name)
             p = re.search(r"(?m)^\s+port trunk pvid vlan (\d+)", b)
             if p and p.group(1) == "1":
                 evid.append(f"{name}: trunk pvid=1")
+                targets.append(name)
         # access/hybrid/默认
-        elif re.search(r"port (default vlan|hybrid pvid vlan) 1\s*$", b):
+        elif re.search(r"port (default vlan|hybrid pvid vlan) 1\s*$", b, re.MULTILINE):
             evid.append(f"{name}: 划入VLAN1或pvid=1")
+            targets.append(name)
         elif "port link-type" not in b and "port hybrid pvid vlan" not in b:
             evid.append(f"{name}: 默认携带VLAN1(pvid=1)")
+            targets.append(name)
 
     if evid:
-        return "FAIL", "; ".join(evid), evid
+        return "FAIL", "; ".join(evid), targets
     return "PASS", "无Vlanif1, 在用端口均未承载VLAN1", None
 
 

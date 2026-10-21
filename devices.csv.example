@@ -1,7 +1,13 @@
 # =============================================================================
-# devices.csv — 设备清单
+# devices.csv.example — 设备清单模板
 # =============================================================================
-# 格式: CSV, 第一行为表头(不可省略), UTF-8编码(带BOM)
+#
+# 用法: 复制本文件为 devices.csv 后填写设备信息
+#   cp devices.csv.example devices.csv
+#
+# devices.csv 已被 .gitignore 排除, 避免明文口令进入版本库。
+#
+# 格式: CSV, 第一行为表头(不可省略), UTF-8编码
 #
 # 字段说明:
 #   字段       必填  说明
@@ -12,18 +18,18 @@
 #   platform   是    设备平台: s-series 或 ce-series
 #   protocol   是    采集协议: 目前仅支持 telnet
 #   username   是    Telnet登录用户名(密码认证模式可留空)
-#   password   否    Telnet登录密码
-#                    为空时从环境变量 VRP_PASS_<IP> 读取
+#   password   否    Telnet登录密码 —— 留空, 由环境变量 VRP_PASS_<IP> 提供
 #                    (IP中点号替换为下划线, 如 10.10.1.11 → VRP_PASS_10_10_1_11)
 #   ──────────────────────────────────────────────────────────────────
 #
 # 注意:
-#   1. 含明文密码的CSV属敏感文件, 运行后请删除或移至安全位置
-#   2. 推荐方式: password列留空, 用环境变量传递密码
+#   1. 不要把口令写进本文件后再提交, 本文件已加入 .gitignore
+#   2. 推荐方式: password 列留空, 用环境变量传递口令
+#      export VRP_PASS_10_10_1_11='你的口令'
 #   3. 设备sysname需只含letter和下划线(如 SW_01, Core_02)
 #   4. 设备banner不得包含冒号 ':' 字符
 # =============================================================================
 type,name,ip,platform,protocol,username,password
-交换机,接入SW-01,10.10.1.11,s-series,telnet,admin,Huawei@123
-交换机,接入SW-02,10.10.1.12,s-series,telnet,admin,Huawei@123
-交换机,汇聚CE-01,10.10.2.11,ce-series,telnet,admin,Huawei@123
+交换机,接入SW-01,10.10.1.11,s-series,telnet,admin,
+交换机,接入SW-02,10.10.1.12,s-series,telnet,admin,
+交换机,汇聚CE-01,10.10.2.11,ce-series,telnet,admin,

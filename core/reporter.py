@@ -140,16 +140,25 @@ def write_report_files(report_data, output_dir):
     report_data: build_report_data() 的返回值
     output_dir: 输出目录
     """
-    # 延迟导入 openpyxl (离线版用vendor, Docker用pip安装的包)
+    # openpyxl: 优先已安装的包, 缺失时回退到 vendor/(离线绿色版)
     import sys
-    vendor_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
-    if os.path.isdir(vendor_dir) and vendor_dir not in sys.path:
-        sys.path.insert(0, vendor_dir)
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill
-    from openpyxl.utils import get_column_letter
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        vendor_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor"
+        )
+        if os.path.isdir(vendor_dir) and vendor_dir not in sys.path:
+            sys.path.append(vendor_dir)
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
 
     # ---- 写 MD 报告 ----
+    os.makedirs(output_dir, exist_ok=True)
+
     md_lines = [
         "# 基线整改文档",
         "",
@@ -223,6 +232,9 @@ def write_report_files(report_data, output_dir):
     ws.title = "不合规明细"
 
     headers = ["IP", "规则ID", "严重度", "不合规位置", "证据"]
+    # 表头是中文, 而 xlsx_rows 里的键是英文, 必须显式映射;
+    # 直接用 headers 做键查找会导致除 IP 外所有列都是空值。
+    col_keys = ["ip", "rule", "severity", "target", "evidence"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
@@ -235,8 +247,8 @@ def write_report_files(report_data, output_dir):
     }
     for row_data in xlsx_rows:
         ws.append([
-            str(row_data.get(h.lower(), ""))
-            for h in headers
+            str(row_data.get(k, ""))
+            for k in col_keys
         ])
         sev = row_data.get("severity", "")
         if sev in fills:
