@@ -82,9 +82,10 @@ jobs:
 
       - name: 工作区不得出现明文口令
         run: |
-          # 审计报告与回归测试会引用该口令作为缺陷证据, 属预期内容, 排除在外
-          # (不用 git pathspec magic, 排除语义在不同 git 版本下不一致)
-          hits=$(git grep -I -n 'Huawei@123' -- . | grep -v -E '^(docs|tests)/' || true)
+          # 审计报告与回归测试会引用该口令作为缺陷证据, 属预期内容, 排除在外。
+          # 注意: 匹配模式写成 'Huawei@12[0-9]' 而不是完整口令, 否则本 workflow
+          # 文件自身(含该模式)会被 grep 命中, 形成自检误报。
+          hits=$(git grep -I -n -E 'Huawei@12[0-9]' -- . | grep -v -E '^(docs|tests)/' || true)
           if [ -n "$hits" ]; then
             echo "::error::检测到明文口令"
             echo "$hits"
@@ -110,7 +111,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 构建镜像
-        run: docker build -t vrp-baseline:ci .
+        # 用 compose 中的同一 tag, 后续 compose up 可直接复用, 不必二次构建
+        run: docker build -t vrp-baseline:2.2 .
 
       - name: 准备 compose 数据目录
         run: |
@@ -138,7 +140,12 @@ jobs:
           echo "::endgroup::"
           if [ "$ready" != "1" ]; then
             echo "::error::Web 容器 60s 内未就绪"
-            docker compose logs web
+            echo "--- compose ps ---"
+            docker compose ps || true
+            echo "--- 容器日志(末尾 40 行) ---"
+            docker compose logs --tail 40 web 2>&1 || true
+            echo "--- 容器退出状态 ---"
+            docker inspect vrp-web --format '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' 2>&1 || true
             exit 1
           fi
           curl -fsS http://localhost:8080/api/system/info

@@ -41,10 +41,11 @@ def check(fid, name, cond, detail=""):
     else:
         FAILED.append(f"{tag} {name} -> {detail}")
         print(f"  [FAIL] {tag} {name}" + (f"  -> {detail}" if detail else ""))
-        # GitHub Actions 会把 ::error:: 解析为注解, PR 上可直接定位到失败用例;
-        # 同时输出到 stderr, 便于在普通 CI 中排查。
-        print(f"::error::{tag} {name}" + (f" -> {detail}" if detail else ""),
-              file=sys.stderr)
+        # GitHub Actions 只从 stdout 解析 ::error:: 工作流命令, 必须打到 stdout
+        # 才能在 PR 上形成注解; 同时写一份到 stderr 便于普通 CI 排查。
+        line = f"::error::{tag} {name}" + (f" -> {detail}" if detail else "")
+        print(line)
+        print(line, file=sys.stderr)
 
 
 def skip(fid, name, reason):
@@ -401,10 +402,20 @@ def main():
     print(f"项目根目录: {_ROOT}")
     print("=" * 64)
 
-    if not only_api:
-        run_core_tests()
-    if not only_core:
-        run_api_tests()
+    try:
+        if not only_api:
+            run_core_tests()
+        if not only_core:
+            run_api_tests()
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        traceback.print_exc()
+        last = [l for l in tb.strip().splitlines() if l.strip()][-1]
+        # 未捕获异常同样以注解形式暴露, 便于在 PR 上直接看到原因
+        print(f"::error::回归测试异常终止: {last}")
+        _write_summary()
+        return 1
 
     print("\n" + "=" * 64)
     total = len(PASSED) + len(FAILED)
