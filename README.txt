@@ -24,6 +24,9 @@ v2.2 新增 Web 前端, 支持浏览器操作全部功能(设备管理/
   docs/AUDIT-2026-10-21.md)。回归测试:
     python tests/test_regression.py
 
+★ 每次 push / PR 会自动执行 CI(.github/workflows/ci.yml):
+  回归测试(Python 3.12 与 3.13) + 凭据卫生检查 + 容器构建与部署链路。
+
 
 二、文件清单
 ------------------------------------------------------------
@@ -60,6 +63,8 @@ v2.2 新增 Web 前端, 支持浏览器操作全部功能(设备管理/
     AUDIT-2026-10-21.md  代码审计报告与修复记录(18项缺陷)
   tests/
     test_regression.py 回归测试(对应审计编号 A01~A18)
+  .github/workflows/  CI流水线
+    ci.yml              回归测试(Python 3.12/3.13) + 凭据卫生 + 容器构建
   runtime/            独立Python 3.12 aarch64 Linux运行时
     bin/python3.12       Python解释器(aarch64 ELF二进制)
     lib/python3.12/      标准库(含telnetlib, 3.12自带)

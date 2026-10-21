@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 回归测试
+  # 用例编号与 docs/AUDIT-2026-10-21.md 中的缺陷编号一一对应
+  # ---------------------------------------------------------------------------
+  test:
+    name: 回归测试 / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 = 随包运行时与 Docker 镜像的基线版本
+        # 3.13 = 已移除 telnetlib, 仅验证离线链路
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 语法检查
+        run: python -m compileall -q core api cli.py vrp_baseline.py tests
+
+      - name: 离线自检 (生成报告, 供 A15 校验)
+        run: |
+          cp devices.csv.example devices.csv
+          grep -v -E '10\.10\.1\.12|10\.10\.2\.11' devices.csv > devices.csv.tmp
+          mv devices.csv.tmp devices.csv
+          python cli.py --offline
+
+      - name: 回归测试
+        run: python tests/test_regression.py
+
+      - name: 上传报告产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-py${{ matrix.python-version }}
+          path: output/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 凭据与产物卫生 (对应审计 A09 / A08)
+  # ---------------------------------------------------------------------------
+  hygiene:
+    name: 凭据与产物卫生
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: devices.csv 不得纳入版本库
+        run: |
+          if git ls-files --error-unmatch devices.csv >/dev/null 2>&1; then
+            echo "::error::devices.csv 可能含明文口令, 不得纳入版本库"
+            exit 1
+          fi
+          echo "OK: devices.csv 未被跟踪"
+
+      - name: 工作区不得出现明文口令
+        run: |
+          # 审计报告与回归测试会引用该口令作为缺陷证据, 属预期内容, 排除在外
+          if git grep -I -n 'Huawei@123' -- . ':(exclude)docs/**' ':(exclude)tests/**' ; then
+            echo "::error::检测到明文口令"
+            exit 1
+          fi
+          echo "OK: 未检出明文口令"
+
+      - name: 模板与产物路径符合约定
+        run: |
+          test -f devices.csv.example || { echo "::error::缺少 devices.csv.example"; exit 1; }
+          test -f docs/AUDIT-2026-10-21.md || { echo "::error::缺少审计报告"; exit 1; }
+          test -f tests/test_regression.py || { echo "::error::缺少回归测试"; exit 1; }
+          grep -q '^output/' .gitignore || { echo "::error::.gitignore 未忽略 output/"; exit 1; }
+          echo "OK: 目录结构与约定一致"
+
+  # ---------------------------------------------------------------------------
+  # 容器构建与部署链路 (对应审计 A07 / A08 / A12)
+  # ---------------------------------------------------------------------------
+  docker:
+    name: 容器构建与部署链路
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建镜像
+        run: docker build -t vrp-baseline:ci .
+
+      - name: 准备 compose 数据目录
+        run: |
+          mkdir -p data/snapshots data/output
+          cp devices.csv.example data/devices.csv
+          cp profile.yaml data/profile.yaml
+          cp rules.yaml data/rules.yaml
+          cp snapshots/10.10.1.11.cfg data/snapshots/10.10.1.11.cfg
+          docker compose config >/dev/null
+          echo "OK: compose 配置可解析"
+
+      - name: Web 容器启动与接口可达
+        run: |
+          docker compose up -d web
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/api/system/info >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/system/info
+          echo ""
+          # /api 必须命中路由而不是被静态挂载吞掉 (A12)
+          curl -fsS http://localhost:8080/api | tee /tmp/api_root.json
+          grep -q '"version"' /tmp/api_root.json
+
+      - name: 容器日志
+        if: failure()
+        run: docker compose logs web
+
+      - name: 停止 Web 容器
+        if: always()
+        run: docker compose down -v || true
+
+      - name: CLI 容器报告落盘到挂载的 output 卷 (A08)
+        run: |
+          docker compose run --rm cli --offline
+          test -f data/output/remediation_report.md || {
+            echo "::error::报告未写入挂载的 output 卷"; exit 1; }
+          test -f data/output/baseline_report.xlsx || {
+            echo "::error::Excel 报告未写入挂载的 output 卷"; exit 1; }
+          ls -l data/output/
+          echo "OK: 报告已落到 ./data/output/"
