@@ -18,7 +18,15 @@ class DeviceStore:
         self._devices = []
         self._lock = threading.Lock()
 
-    def list(self) -> list[dict]:
+    def list_all(self) -> list[dict]:
+        """列出全部设备。
+
+        方法名不能叫 list: 类体内的名字 list 会遮蔽内建 list,
+        使本类中后续的 list[dict] 注解在 Python < 3.14(注解急切求值)
+        解析到该方法而非内建类型, 抛
+        TypeError: 'function' object is not subscriptable,
+        导致本模块无法导入。命名与 TaskStore.list_all 保持一致。
+        """
         with self._lock:
             return list(self._devices)
 

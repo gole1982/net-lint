@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/devices", tags=["设备管理"])
 
 @router.get("", response_model=list[DeviceOut])
 async def list_devices():
-    devices = device_store.list()
+    devices = device_store.list_all()
     return [
         DeviceOut(
             type=d.get("type", "交换机"),

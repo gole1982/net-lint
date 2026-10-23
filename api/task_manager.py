@@ -90,7 +90,7 @@ async def create_and_run_task(
         active_rules = [r for r in active_rules if r.rid in rid_set]
 
     # 获取设备列表
-    devices = device_store.list()
+    devices = device_store.list_all()
     if device_ips:
         ip_set = set(device_ips)
         devices = [d for d in devices if d["ip"] in ip_set]

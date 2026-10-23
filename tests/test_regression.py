@@ -23,6 +23,7 @@ tests/test_regression.py — 基线检查引擎回归测试
 import os
 import sys
 import asyncio
+import inspect
 
 # 项目根目录加入 sys.path
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,6 +52,61 @@ def check(fid, name, cond, detail=""):
 def skip(fid, name, reason):
     SKIPPED.append(f"[{fid}] {name} ({reason})")
     print(f"  [SKIP] [{fid}] {name}  ({reason})")
+
+
+def _class_annotation_shadowing(cls):
+    """复现 Python<3.14 的"类体注解急切求值"语义, 返回被同名成员遮蔽的注解。
+
+    Python 3.14 起(PEP 649)注解默认延迟求值, 因此"类成员名遮蔽内建类型"
+    这类问题在本机完全不可见; 但在 Python 3.12/3.13(随包运行时与 Docker
+    基础镜像的版本)上会在导入期直接抛
+    TypeError: 'function' object is not subscriptable, 导致 Web 服务起不来。
+
+    这里按类体语句顺序重建命名空间并逐个求值注解, 精确复现旧版语义,
+    使该类问题在任何解释器上都能被检出。
+    """
+    import ast
+    import textwrap
+
+    try:
+        src = textwrap.dedent(inspect.getsource(cls))
+        tree = ast.parse(src)
+    except (OSError, TypeError, SyntaxError):
+        return []
+
+    cnode = next((n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)), None)
+    if cnode is None:
+        return []
+
+    # 类体名字解析顺序: 类命名空间 -> 模块全局 -> 内建
+    ns = dict(vars(sys.modules.get(cls.__module__, object)))
+    problems = []
+    for stmt in cnode.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            anns = []
+            if stmt.returns is not None:
+                anns.append(("return", stmt.returns))
+            args = (list(stmt.args.posonlyargs) + list(stmt.args.args)
+                    + list(stmt.args.kwonlyargs))
+            for a in args:
+                if a.annotation is not None:
+                    anns.append((a.arg, a.annotation))
+            for key, ann in anns:
+                try:
+                    eval(compile(ast.Expression(ann), "<annotation>", "eval"), ns)
+                except TypeError as e:
+                    problems.append(f"{cls.__name__}.{stmt.name} -> {key}: {e}")
+            # 方法在类体中先求值注解, 之后才绑定到类命名空间
+            ns[stmt.name] = getattr(cls, stmt.name, None)
+        elif isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                if isinstance(t, ast.Name):
+                    try:
+                        ns[t.id] = eval(  # noqa: S307 - 复现类体求值语义
+                            compile(ast.Expression(stmt.value), "<value>", "eval"), ns)
+                    except Exception:
+                        ns[t.id] = None
+    return problems
 
 
 # =============================================================================
@@ -381,6 +437,40 @@ def run_api_tests():
     except Exception as e:
         check("A06", "报告缺失返回 404", getattr(e, "status_code", None) == 404,
               f"{type(e).__name__}: {e}")
+
+    print("\n--- A19 类体注解不得被同名成员遮蔽内建类型 ---")
+    # Python 3.14 起注解默认延迟求值(PEP 649), "类成员遮蔽内建类型" 这类
+    # 问题在本机完全不可见, 但在 Python 3.12/3.13(随包运行时与 Docker
+    # 基础镜像的版本)上会在导入期直接抛
+    # TypeError: 'function' object is not subscriptable, 导致 Web 服务起不来。
+    # 这里用类命名空间强制求值注解, 复现旧版语义, 使问题在任何解释器上都能检出。
+    import importlib
+    import inspect
+    import pkgutil
+
+    shadowed = []
+    import_fail = []
+    for pkg_name in ("api", "core"):
+        try:
+            pkg = importlib.import_module(pkg_name)
+        except Exception as e:
+            # 包无法导入本身就是严重问题(例如 A19 这类导入期错误), 不能静默跳过
+            import_fail.append(f"import {pkg_name} 失败: {type(e).__name__}: {e}")
+            continue
+        mods = [pkg]
+        for m in pkgutil.walk_packages(pkg.__path__, pkg_name + "."):
+            try:
+                mods.append(importlib.import_module(m.name))
+            except Exception as e:
+                import_fail.append(f"import {m.name} 失败: {type(e).__name__}: {e}")
+                continue
+        for mod in mods:
+            for cname, cls in vars(mod).items():
+                if not inspect.isclass(cls) or getattr(cls, "__module__", "") != mod.__name__:
+                    continue
+                shadowed.extend(_class_annotation_shadowing(cls))
+    check("A19", "类体注解未被同名成员遮蔽内建类型", not shadowed, shadowed)
+    check("A19", "所有一方模块均可正常导入", not import_fail, import_fail)
 
     print("\n--- A12 /api 路由可达性 ---")
     sc = {"type": "http", "method": "GET", "path": "/api", "root_path": "", "headers": []}
