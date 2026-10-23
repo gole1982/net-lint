@@ -140,12 +140,12 @@ jobs:
           echo "::endgroup::"
           if [ "$ready" != "1" ]; then
             echo "::error::Web 容器 60s 内未就绪"
-            echo "--- compose ps ---"
-            docker compose ps || true
-            echo "--- 容器日志(末尾 40 行) ---"
-            docker compose logs --tail 40 web 2>&1 || true
-            echo "--- 容器退出状态 ---"
-            docker inspect vrp-web --format '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' 2>&1 || true
+            echo "::error::--- compose ps ---"
+            docker compose ps 2>&1 | while IFS= read -r l; do echo "::error::$l"; done
+            echo "::error::--- 容器状态 ---"
+            docker inspect vrp-web --format 'status={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}} oom={{.State.OOMKilled}}' 2>&1 | while IFS= read -r l; do echo "::error::$l"; done
+            echo "::error::--- 容器日志(末尾 30 行) ---"
+            docker compose logs --tail 30 web 2>&1 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           fi
           curl -fsS http://localhost:8080/api/system/info

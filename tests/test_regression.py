@@ -411,9 +411,11 @@ def main():
         import traceback
         tb = traceback.format_exc()
         traceback.print_exc()
-        last = [l for l in tb.strip().splitlines() if l.strip()][-1]
-        # 未捕获异常同样以注解形式暴露, 便于在 PR 上直接看到原因
-        print(f"::error::回归测试异常终止: {last}")
+        # 逐行输出为注解: GitHub 只从 stdout 解析 ::error::, 逐行输出才能在
+        # PR 上直接看到出错的文件与行号。
+        print("::error::回归测试异常终止, 完整调用栈:")
+        for l in tb.rstrip().splitlines():
+            print(f"::error::{l}")
         _write_summary()
         return 1
 
