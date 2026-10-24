@@ -57,8 +57,9 @@ def _telnet_login(tn, dev):
     username = dev.get("username", "")
     password = dev.get("password", "")
 
-    # 设备名只含 letter 和下划线
-    prompt_re = rb"<[A-Za-z_]+>"
+    # 设备名可含字母/数字/下划线/连字符/点 (如 <SW-01-SAMPLE>)。
+    # 只允许字母和下划线会把随包样例的提示符判成登录失败。
+    prompt_re = rb"<[\w.-]+>"
 
     # ---- 第一步: 等待登录提示符 (Username: 或 Password:) ----
     idx, match_obj, data = tn.expect([rb":\s*$"], timeout=15)
@@ -161,7 +162,7 @@ def fetch_telnet(dev):
     raw = data.decode("utf-8", errors="ignore").splitlines()
     lines = []
     skip_cmd = "display current-configuration"
-    prompt_clean_re = re.compile(r"<[A-Za-z_]+>")
+    prompt_clean_re = re.compile(r"<[\w.-]+>")
     for line in raw:
         stripped = line.rstrip()
         if stripped == skip_cmd or stripped.startswith(skip_cmd + " "):

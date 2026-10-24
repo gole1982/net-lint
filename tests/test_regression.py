@@ -24,6 +24,7 @@ import os
 import sys
 import asyncio
 import inspect
+import yaml
 
 # 项目根目录加入 sys.path
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -354,6 +355,7 @@ def run_api_tests():
     # 用二进制备份/还原: 文本模式会做换行符转换, 还原后文件不再是原始字节,
     # 会在工作区留下无意义的换行符差异。
     backup = open(PROFILE, "rb").read()
+    before_vars = yaml.safe_load(backup)["variables"]
     try:
         print("\n--- A11 profile 回写必须保留注释 ---")
         r = asyncio.run(update_variables(VariableUpdate(variables={"ntpServer1": "10.88.88.88"})))
@@ -362,7 +364,8 @@ def run_api_tests():
         check("A11", "注释数量未减少", after.count("#") == backup.count(b"#"),
               (backup.count(b"#"), after.count("#")))
         check("A11", "中文注释原样保留", "第一NTP服务器IP" in after)
-        check("A11", "其它变量未受影响", r.get("snmpRo") == "Ro@Huawei123", r.get("snmpRo"))
+        check("A11", "其它变量未受影响",
+              r.get("snmpRo") == before_vars["snmpRo"], r.get("snmpRo"))
 
         r = asyncio.run(toggle_rule("SW-SNMP-04", RuleToggle(enabled=False)))
         after2 = open(PROFILE, encoding="utf-8").read()
@@ -372,8 +375,10 @@ def run_api_tests():
               asyncio.run(get_profile())["rules"]["SW-NTP-01"] is True)
 
         r = asyncio.run(update_profile(ProfileUpdate(variables={"ntpServer1": "10.77.77.77"})))
-        check("A11", "整段替换只保留指定键",
-              list(r["variables"].keys()) == ["ntpServer1"], r["variables"])
+        # 部分更新必须合并: 整段替换会删掉未提交的变量, 导致后续任务 KeyError
+        check("A11", "部分更新不删除其它变量",
+              set(before_vars) <= set(r["variables"]) and
+              r["variables"]["ntpServer1"] == "10.77.77.77", r["variables"])
         check("A11", "rules 段不受影响", "SW-IPV6-01: true" in after2)
     finally:
         with open(PROFILE, "wb") as f:
@@ -404,8 +409,13 @@ def run_api_tests():
         check("A10", "正确令牌放行", resp == ("OK", 200), resp)
         FakeReq.headers = {}
         FakeReq.query_params = {"token": "secret123"}
+        FakeReq.url.path = "/api/sse/abc123"
         resp = asyncio.run(appmod.api_token_guard(FakeReq(), call_next))
         check("A10", "SSE 查询参数方式放行", resp == ("OK", 200), resp)
+        FakeReq.url.path = "/api/devices"
+        resp = asyncio.run(appmod.api_token_guard(FakeReq(), call_next))
+        check("A10", "普通接口不接受查询参数令牌",
+              getattr(resp, "status_code", None) == 401, resp)
         FakeReq.url.path = "/"
         FakeReq.query_params = {}
         resp = asyncio.run(appmod.api_token_guard(FakeReq(), call_next))

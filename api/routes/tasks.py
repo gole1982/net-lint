@@ -9,7 +9,9 @@ GET    /api/tasks/{id}/download/{fmt}  下载报告文件(md/xlsx)
 ================================================================
 """
 
+import logging
 import os
+import re
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -19,6 +21,14 @@ from ..store import task_store
 from ..task_manager import create_and_run_task, report_dir
 
 router = APIRouter(prefix="/api/tasks", tags=["任务管理"])
+logger = logging.getLogger("vrp_baseline")
+# task_id 会参与报告目录拼接, 只允许安全字符
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _check_task_id(task_id: str):
+    if not _TASK_ID_RE.match(task_id):
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
 
 @router.post("", response_model=TaskOut)
@@ -31,8 +41,10 @@ async def create_task(task: TaskCreate):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回给客户端 (可能含路径/凭证线索)
+        logger.exception("创建任务失败")
+        raise HTTPException(status_code=500, detail="创建任务失败, 详情见服务端日志")
     return task_store.get(task_id)
 
 
@@ -43,6 +55,7 @@ async def list_tasks():
 
 @router.get("/{task_id}", response_model=TaskOut)
 async def get_task(task_id: str):
+    _check_task_id(task_id)
     t = task_store.get(task_id)
     if not t:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
@@ -51,6 +64,7 @@ async def get_task(task_id: str):
 
 @router.get("/{task_id}/results")
 async def get_task_results(task_id: str):
+    _check_task_id(task_id)
     t = task_store.get(task_id)
     if not t:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
@@ -69,15 +83,24 @@ async def download_report(task_id: str, fmt: str):
     if fmt not in ("md", "xlsx"):
         raise HTTPException(status_code=400, detail="格式仅支持 md 或 xlsx")
 
+    _check_task_id(task_id)
     t = task_store.get(task_id)
     if not t:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if t["status"] == "failed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"任务失败, 无报告可下载: {t.get('message', '')}",
+        )
     if t["status"] != "done":
         raise HTTPException(status_code=400, detail="任务尚未完成")
 
     # 报告按 task_id 存放, 保证下载到的确实是该任务的报告
     fname = "remediation_report.md" if fmt == "md" else "baseline_report.xlsx"
-    path = os.path.join(report_dir(task_id), fname)
+    base = os.path.realpath(report_dir(task_id))
+    path = os.path.realpath(os.path.join(base, fname))
+    if os.path.commonpath([base, path]) != base:
+        raise HTTPException(status_code=404, detail="报告路径非法")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"报告文件不存在: {fname}")
 

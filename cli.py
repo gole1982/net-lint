@@ -65,7 +65,7 @@ def run(offline=False):
     from core.rule_loader import load_rules, load_profile, validate_vars
     from core.credentials import load_devices
     from core.collector import fetch
-    from core.engine import run_all
+    from core.engine import run_all_detailed, not_checked_reason
     from core.reporter import build_report_data, write_report_files, save_snapshots
 
     base_dir = _BASE_DIR
@@ -114,6 +114,7 @@ def run(offline=False):
 
     results = {}
     cfg_map = {}
+    device_results = {}
 
     # 并发采集 + 检查
     workers = min(len(devices), 10) if devices else 1
@@ -128,18 +129,35 @@ def run(offline=False):
             try:
                 cfg = fut.result()
                 cfg_map[ip] = cfg
-                results[ip] = run_all(
+                findings, stats = run_all_detailed(
                     active_rules, cfg, variables,
                     platform=dev.get("platform", ""),
                     device_type=dev.get("type", ""),
                 )
+                results[ip] = findings
+                if stats.get("evaluated"):
+                    device_results[ip] = {"status": "ok", "message": ""}
+                else:
+                    device_results[ip] = {
+                        "status": "not_checked",
+                        "message": not_checked_reason(stats),
+                        "checked_rules": stats.get("applied", 0),
+                        "total_rules": stats.get("total", 0),
+                    }
+                    logger.warning(
+                        f"未执行任何检查: {ip} - "
+                        f"{not_checked_reason(stats)}"
+                    )
                 logger.info(f"采集完成: {ip} ({dev.get('name', '')})")
             except Exception as e:
                 results[ip] = [("ERROR", (ip, str(e), []))]
+                device_results[ip] = {"status": "error", "message": str(e)}
                 logger.error(f"采集失败: {ip} - {e}")
 
     # 生成报告数据
-    report_data = build_report_data(results, devices, variables)
+    report_data = build_report_data(
+        results, devices, variables, device_results=device_results
+    )
 
     # 写报告文件
     write_report_files(report_data, output_dir)

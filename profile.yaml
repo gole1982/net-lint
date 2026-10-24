@@ -32,8 +32,9 @@ profile: 华为园区交换机基线策略
 variables:
   ntpServer1: 10.1.1.100          # SW-NTP-01: 第一NTP服务器IP
   ntpServer2: 10.1.1.101          # SW-NTP-01: 第二NTP服务器IP
-  snmpRo: Ro@Huawei123            # SW-SNMP-01: SNMP只读团体字
-  snmpRw: Rw@Huawei123            # SW-SNMP-02: SNMP读写团体字
+  # 团体字请替换为现场实际值; 模板内不要提交真实凭据。
+  snmpRo: RoChangeMe              # SW-SNMP-01: SNMP只读团体字
+  snmpRw: RwChangeMe              # SW-SNMP-02: SNMP读写团体字
   trapHost: 10.1.1.200            # SW-SNMP-04: Trap告警主机地址
   snmpAcl: "2000"                 # SW-SNMP-05: SNMP限制ACL号(引号防止YAML解析为整数)
 

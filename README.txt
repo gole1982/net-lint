@@ -58,11 +58,14 @@ v2.2 新增 Web 前端, 支持浏览器操作全部功能(设备管理/
   profile.yaml        用户配置(规则开关 + 变量值, 唯一需编辑)
   devices.csv.example 设备清单模板(复制为 devices.csv 后填写)
   devices.csv         设备清单(本地文件, 不入库, 勿提交明文口令)
-  snapshots/          配置快照目录(在线自动保存, 离线读取)
+                       Web端增删改会写回本文件(不写入口令), 重启后生效;
+                       挂载为只读时自动降级为仅内存生效。
+  snapshots/          配置快照目录(在线自动保存, 离线读取; 文件名为 <设备IP>.cfg)
   docs/               文档目录
-    AUDIT-2026-10-21.md  代码审计报告与修复记录(18项缺陷)
+    audit/            多轮代码审计报告与复核评分(评分见 AUDIT-REVIEW-2026-10-24.md)
   tests/
     test_regression.py 回归测试(对应审计编号 A01~A18)
+    test_engine_semantics.py / test_api_e2e.py  pytest 用例(引擎语义 + API 端到端)
   .github/workflows/  CI流水线
     ci.yml              回归测试(Python 3.12/3.13) + 凭据卫生 + 容器构建
   runtime/            独立Python 3.12 aarch64 Linux运行时
@@ -404,6 +407,7 @@ VRP唯一前缀兼容:
   - 无需 runtime/ 和 vendor/, 镜像内自带 Python 3.12 + 全部依赖
   - 自动适配 x86_64 和 aarch64 (multi-arch)
   - 用户数据通过数据卷挂载, 与镜像解耦
+  - 容器以非 root (uid 1000) 运行; data/ 目录需对该 uid 可写
 
 1. 构建镜像:
      docker build -t vrp-baseline:2.2 .
@@ -413,7 +417,9 @@ VRP唯一前缀兼容:
      cp devices.csv  data/
      cp profile.yaml data/
      cp rules.yaml   data/
-     cp snapshots/sample.cfg data/snapshots/  (离线测试用)
+     # 离线测试: 文件名必须是 devices.csv 中的设备 IP
+     cp snapshots/10.10.1.11.cfg data/snapshots/10.10.1.11.cfg
+     # snapshots/sample.cfg 是与该文件内容一致的示意样例, 不会直接被读取
 
 3. 启动Web服务 (推荐):
      docker compose up -d

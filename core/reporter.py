@@ -16,32 +16,47 @@ from .models import Rule, VAR_RE, SEV_ORDER
 
 
 def render_fix(fix_text, target, variables):
-    """将fix模板中的变量替换为实际值"""
-    def _sub(m):
-        name = m.group(1)
-        if name == "if":
-            return "" if target == "system" else target
-        if name == "platform":
-            return ""
-        v = variables.get(name)
-        if v is None:
-            return "${" + name + "}"
-        return str(v[0] if isinstance(v, list) else v)
+    """将fix模板中的变量替换为实际值
 
-    result = VAR_RE.sub(_sub, fix_text).strip("\n")
-    return "\n".join(l for l in result.split("\n") if l.strip())
+    target 可能是多个接口用 "; " 拼接的字符串 (内置检查的历史格式)。
+    整改命令必须逐接口生成, 否则会拼出 "interface A; B; C" 这种非法命令。
+    """
+    targets = [t.strip() for t in str(target).split(";") if t.strip()] or ["system"]
+
+    def _render_one(one_target):
+        def _sub(m):
+            name = m.group(1)
+            if name == "if":
+                return "" if one_target == "system" else one_target
+            if name == "platform":
+                return ""
+            v = variables.get(name)
+            if v is None:
+                return "${" + name + "}"
+            return str(v[0] if isinstance(v, list) else v)
+
+        result = VAR_RE.sub(_sub, fix_text).strip("\n")
+        return "\n".join(l for l in result.split("\n") if l.strip())
+
+    blocks = []
+    for one_target in targets:
+        block = _render_one(one_target)
+        if block and block not in blocks:
+            blocks.append(block)
+    return "\n".join(blocks)
 
 
-def build_report_data(results, devices, variables):
+def build_report_data(results, devices, variables, device_results=None):
     """将检查结果转为结构化 dict
     results: {ip: [(rule_or_"ERROR", (target, evidence, fix_lines))]}
     devices: [dict]
     variables: {var_name: value}
+    device_results: {ip: {status, message}} 可选, 用于标记"未执行任何规则"
     返回: {
         "generated_at": str,
         "device_count": int,
-        "devices": [{ip, name, errors, findings, suggestions}],
-        "summary": {total_fail, total_suggest, total_devices}
+        "devices": [{ip, name, errors, findings, suggestions, unchecked}],
+        "summary": {total_fail, total_suggest, total_unchecked, total_devices}
     }
     """
     name_of = {d["ip"]: d.get("name", d["ip"]) for d in devices}
@@ -50,9 +65,13 @@ def build_report_data(results, devices, variables):
     device_reports = []
     total_fail = 0
     total_suggest = 0
+    total_unchecked = 0
+    device_results = device_results or {}
 
     for ip in sorted(results.keys()):
         items = results[ip]
+        meta = device_results.get(ip) or {}
+        unchecked = meta.get("status") == "not_checked"
 
         # 区分错误项和规则检查结果
         # run_all 返回 [(rule, [Finding])], 错误为 ("ERROR", (ip, msg, []))
@@ -74,7 +93,7 @@ def build_report_data(results, devices, variables):
                for finding in findings
                if rule.severity == "suggest"]
 
-        if not bad and not sug and not err_items:
+        if not bad and not sug and not err_items and not unchecked:
             continue
 
         dev_report = {
@@ -83,7 +102,13 @@ def build_report_data(results, devices, variables):
             "errors": [],
             "findings": [],
             "suggestions": [],
+            "unchecked": "",
+            "checked_rules": meta.get("checked_rules", 0),
+            "total_rules": meta.get("total_rules", 0),
         }
+        if unchecked:
+            dev_report["unchecked"] = meta.get("message") or "未执行任何规则"
+            total_unchecked += 1
 
         # 错误项
         for _, (target, evidence, _) in err_items:
@@ -130,6 +155,7 @@ def build_report_data(results, devices, variables):
         "summary": {
             "total_fail": total_fail,
             "total_suggest": total_suggest,
+            "total_unchecked": total_unchecked,
             "total_devices": len(devices),
         },
     }
@@ -164,6 +190,11 @@ def write_report_files(report_data, output_dir):
         "",
         f"**生成时间**: {report_data['generated_at']}",
         f"**设备总数**: {report_data['device_count']}",
+        f"**未执行检查的设备**: "
+        f"{report_data['summary'].get('total_unchecked', 0)}",
+        "",
+        "> 未执行检查的设备不代表合规: 请核对 devices.csv 中的 "
+        "platform/type 与规则库 platforms/device_type 是否一致。",
         "",
     ]
 
@@ -181,6 +212,24 @@ def write_report_files(report_data, output_dir):
             md_lines.append(f"- **位置**: {err['target']}")
             md_lines.append(f"- **原因**: {err['evidence']}")
             md_lines.append("")
+
+        # 未执行检查
+        if dev.get("unchecked"):
+            md_lines.append("### 未执行检查")
+            md_lines.append(f"- **原因**: {dev['unchecked']}")
+            md_lines.append(
+                f"- **说明**: 已执行规则 "
+                f"{dev.get('checked_rules', 0)}/{dev.get('total_rules', 0)} 条, "
+                "该设备结果不代表合规"
+            )
+            md_lines.append("")
+            xlsx_rows.append({
+                "ip": ip,
+                "rule": "-",
+                "severity": "unchecked",
+                "target": "-",
+                "evidence": dev["unchecked"],
+            })
 
         # 不合规项
         for f in dev["findings"]:
@@ -244,6 +293,7 @@ def write_report_files(report_data, output_dir):
         "medium": "FFEB9C",
         "low": "E2EFDA",
         "suggest": "DDEBF7",
+        "unchecked": "D9D9D9",
     }
     for row_data in xlsx_rows:
         ws.append([
@@ -291,6 +341,10 @@ def save_snapshots(cfg_map, devices, base_dir):
             with open(snap_path, "w", encoding="utf-8") as f:
                 f.write(cfg)
             saved += 1
-        except OSError:
-            pass
+        except OSError as e:
+            # 静默吞掉会让 "快照已更新" 的假设不成立, 至少给出可见告警。
+            import logging
+            logging.getLogger("vrp_baseline").warning(
+                f"快照保存失败: {snap_path} ({e})"
+            )
     print(f"  快照目录: {snap_dir}/ (已保存 {saved} 台)")

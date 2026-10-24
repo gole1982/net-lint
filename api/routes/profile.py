@@ -11,10 +11,12 @@ GET  /api/rules              获取规则库定义(只读)
 ================================================================
 """
 
+import errno
 import os
 import re
 import sys
 import tempfile
+import threading
 
 from fastapi import APIRouter, HTTPException
 
@@ -42,6 +44,8 @@ router = APIRouter(tags=["配置管理"])
 
 _profile_path = os.path.join(_PROJECT_ROOT, "profile.yaml")
 _rules_path = os.path.join(_PROJECT_ROOT, "rules.yaml")
+# profile.yaml 的读-改-写必须串行化, 否则并发请求会互相覆盖。
+_PROFILE_LOCK = threading.Lock()
 
 
 def _load_profile():
@@ -80,6 +84,28 @@ def _render_scalar(value):
     return dumped.split(":", 1)[1].strip()
 
 
+def _find_section(lines, section):
+    """返回段头行号 (顶格 'name:'), 不存在时返回 None。"""
+    for i, line in enumerate(lines):
+        if line.rstrip() == f"{section}:" and not line.startswith((" ", "\t")):
+            return i
+    return None
+
+
+def _section_end(lines, start):
+    """段尾: 下一个顶格键或文件结尾 (顶格注释不算段尾)。"""
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if not line.strip():
+            continue
+        if line.startswith((" ", "\t")):
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        return i
+    return len(lines)
+
+
 def _update_section(text, section, updates, prune=False):
     """在保留注释的前提下更新 YAML 中某个映射段
 
@@ -88,64 +114,69 @@ def _update_section(text, section, updates, prune=False):
     updates:  {键: 新值}
     prune:    True 时删除该段中不在 updates 里的键(整段替换语义)
     返回:     更新后的文本
+
+    修正点 (旧实现的三处问题):
+      1. 新增键插到“段尾”而不是最后一个键之后 —— 会落进下一个段;
+         若被删除的段位于文件末尾, 还会因索引越界抛 IndexError。
+      2. 先删行、后用旧索引插入, 导致插入位置错乱。
+      3. prune 删除键时不考虑键行上的注释。
     """
     if not updates and not prune:
         return text
 
     lines = text.splitlines()
-
-    # ---- 定位段头 ----
-    start = None
-    for i, l in enumerate(lines):
-        if l.rstrip() == f"{section}:":
-            start = i
-            break
+    start = _find_section(lines, section)
 
     if start is None:
-        # 段不存在, 追加到文件末尾
+        # 段不存在: 追加到文件末尾 (前面补一个空行, 避免与上一个段粘连)
+        if lines and lines[-1].strip():
+            lines.append("")
         lines.append(f"{section}:")
         for k, v in updates.items():
             lines.append(f"  {k}: {_render_scalar(v)}")
         return "\n".join(lines) + "\n"
 
-    # ---- 定位段尾(下一个顶格键 或 文件结束) ----
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        l = lines[i]
-        if l.strip() and not l.startswith((" ", "\t")) and not l.lstrip().startswith("#"):
-            end = i
-            break
+    end = _section_end(lines, start)
 
-    # ---- 段内定点更新 ----
-    remaining = dict(updates)
+    key_lines = []  # [(行号, 键, 缩进)]
     for i in range(start + 1, end):
-        l = lines[i]
-        m = _KEY_RE.match(l)
-        if not m:
+        m = _KEY_RE.match(lines[i])
+        if m:
+            key_lines.append((i, m.group(2), m.group(1)))
+
+    remaining = dict(updates)
+    remove = set()
+    replace = {}
+    for i, key, indent in key_lines:
+        if key in remaining:
+            cm = _COMMENT_RE.search(lines[i])
+            comment = cm.group(1).rstrip() if cm else ""
+            replace[i] = (
+                f"{indent}{key}: {_render_scalar(remaining.pop(key))}{comment}"
+            )
+        elif prune:
+            remove.add(i)
+
+    for i, new_line in replace.items():
+        lines[i] = new_line
+
+    # 插入锚点: 段内最后一个保留下来的键; 一个都没有时紧跟段头
+    anchor = max((i for i, _k, _ind in key_lines if i not in remove), default=start)
+    new_lines = [
+        f"  {k}: {_render_scalar(v)}" for k, v in remaining.items()
+    ]
+
+    out = []
+    for i, line in enumerate(lines):
+        if i == anchor + 1:
+            out.extend(new_lines)
+        if i in remove:
             continue
-        indent, key = m.group(1), m.group(2)
-        if key not in remaining:
-            # prune 模式下删除已不存在的键
-            if prune and key not in updates:
-                lines[i] = None
-            continue
-        cm = _COMMENT_RE.search(l)
-        comment = cm.group(1).rstrip() if cm else ""
-        lines[i] = f"{indent}{key}: {_render_scalar(remaining.pop(key))}{comment}"
+        out.append(line)
+    if anchor >= len(lines) - 1:
+        out.extend(new_lines)
 
-    lines = [l for l in lines if l is not None]
-
-    # ---- 段内新增不存在的键 ----
-    if remaining:
-        insert_at = end
-        # 段尾若有空行, 把新键插到最后一条已知键之后, 空行留到段末
-        while insert_at > start + 1 and not lines[insert_at - 1].strip():
-            insert_at -= 1
-        lines[insert_at:insert_at] = [
-            f"  {k}: {_render_scalar(v)}" for k, v in remaining.items()
-        ]
-
-    return "\n".join(lines) + "\n"
+    return "\n".join(out) + "\n"
 
 
 def _save_profile(sections):
@@ -155,36 +186,43 @@ def _save_profile(sections):
     写入采用"临时文件 + 原子替换", 避免进程中断导致配置文件被截断。
     写盘前先做回读校验, 渲染逻辑一旦出错不会污染用户配置文件。
     """
-    with open(_profile_path, encoding="utf-8") as f:
-        text = f.read()
+    with _PROFILE_LOCK:
+        with open(_profile_path, encoding="utf-8") as f:
+            text = f.read()
 
-    for name, updates, prune in sections:
-        text = _update_section(text, name, updates or {}, prune)
+        for name, updates, prune in sections:
+            text = _update_section(text, name, updates or {}, prune)
 
-    # ---- 回写前校验 ----
-    try:
-        parsed = yaml.safe_load(text) or {}
-    except Exception as e:
-        raise ValueError(f"profile.yaml 生成结果无法解析, 已放弃写入: {e}")
-    for name, updates, _prune in sections:
-        got = parsed.get(name) or {}
-        for k, v in (updates or {}).items():
-            if got.get(k) != v:
-                raise ValueError(
-                    f"profile.yaml 生成结果校验失败: {name}.{k} = {got.get(k)!r}, 期望 {v!r}"
-                )
+        # ---- 回写前校验 ----
+        try:
+            parsed = yaml.safe_load(text) or {}
+        except Exception as e:
+            raise ValueError(f"profile.yaml 生成结果无法解析, 已放弃写入: {e}")
+        for name, updates, _prune in sections:
+            got = parsed.get(name) or {}
+            for k, v in (updates or {}).items():
+                if got.get(k) != v:
+                    raise ValueError(
+                        f"profile.yaml 生成结果校验失败: "
+                        f"{name}.{k} = {got.get(k)!r}, 期望 {v!r}"
+                    )
 
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=os.path.dirname(_profile_path), prefix=".profile-", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp_path, _profile_path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(_profile_path), prefix=".profile-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp_path, _profile_path)
+        except OSError as e:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            # 单文件 bind mount 上 rename 会返回 EBUSY/EXDEV,
+            # 此时退化为原地截断写 (可以写挂载点里的文件, 但不能替换它)。
+            if e.errno not in (errno.EBUSY, errno.EXDEV, errno.EACCES):
+                raise
+            with open(_profile_path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
 
 
 @router.get("/api/profile")
@@ -196,12 +234,14 @@ async def get_profile():
 async def update_profile(update: ProfileUpdate):
     profile = _load_profile()
     sections = []
+    # 合并而非整段替换: 客户端只提交部分变量时, 整段 prune 会删掉其余变量,
+    # 触发 validate_vars 的 KeyError, 让后续所有检查任务 500。
     if update.variables is not None:
-        profile["variables"] = update.variables
-        sections.append(("variables", update.variables, True))
+        profile.setdefault("variables", {}).update(update.variables)
+        sections.append(("variables", update.variables, False))
     if update.rules is not None:
-        profile["rules"] = update.rules
-        sections.append(("rules", update.rules, True))
+        profile.setdefault("rules", {}).update(update.rules)
+        sections.append(("rules", update.rules, False))
     if sections:
         _save_profile(sections)
     return profile

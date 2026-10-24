@@ -5,7 +5,9 @@ api.schemas — Pydantic 数据模型 (请求/响应)
 ================================================================
 """
 
-from pydantic import BaseModel, Field
+import ipaddress
+
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
 
@@ -22,6 +24,16 @@ class DeviceBase(BaseModel):
     platform: Platform = Field(..., description="设备平台")
     protocol: str = Field("telnet", description="采集协议")
     username: str = Field("", description="Telnet登录用户名")
+
+    @field_validator("ip")
+    @classmethod
+    def _ip_must_be_valid(cls, v: str) -> str:
+        """ip 会参与快照文件名拼接 (snapshots/<ip>.cfg), 必须严格校验。"""
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError("ip 必须是合法的 IPv4/IPv6 地址")
+        return v
 
 
 class DeviceCreate(DeviceBase):
@@ -42,6 +54,17 @@ class DeviceUpdate(BaseModel):
     platform: Optional[Platform] = None
     username: Optional[str] = None
     password: Optional[str] = None
+
+    @field_validator("ip")
+    @classmethod
+    def _ip_must_be_valid(cls, v):
+        if v is None:
+            return v
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError("ip 必须是合法的 IPv4/IPv6 地址")
+        return v
 
 
 class RuleToggle(BaseModel):
@@ -112,3 +135,5 @@ class SelfCheckResult(BaseModel):
     yaml_version: str = ""
     openpyxl_version: str = ""
     python_version: str = ""
+    # 离线绿色包(vendor/)的架构提示; 空串表示无需提示
+    vendor_note: str = ""

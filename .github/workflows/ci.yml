@@ -52,8 +52,14 @@ jobs:
           mv devices.csv.tmp devices.csv
           python cli.py --offline
 
-      - name: 回归测试
+      - name: 回归测试(脚本)
         run: python tests/test_regression.py
+
+      - name: 安装测试依赖
+        run: pip install pytest httpx
+
+      - name: 引擎语义与 API 端到端测试
+        run: python -m pytest -q tests/
 
       - name: 上传报告产物
         if: always()
@@ -85,7 +91,9 @@ jobs:
           # 审计报告与回归测试会引用该口令作为缺陷证据, 属预期内容, 排除在外。
           # 注意: 匹配模式写成 'Huawei@12[0-9]' 而不是完整口令, 否则本 workflow
           # 文件自身(含该模式)会被 grep 命中, 形成自检误报。
-          hits=$(git grep -I -n -E 'Huawei@12[0-9]' -- . | grep -v -E '^(docs|tests)/' || true)
+          # 同时覆盖两种历史写法: Huawei@123 与 Ro@Huawei123。
+          hits=$(git grep -I -n -E 'Huawei@12[0-9]|(Ro|Rw)@Huawei[0-9]+' -- . \
+            | grep -v -E '^(docs|tests)/' || true)
           if [ -n "$hits" ]; then
             echo "::error::检测到明文口令"
             echo "$hits"
@@ -96,7 +104,8 @@ jobs:
       - name: 模板与产物路径符合约定
         run: |
           test -f devices.csv.example || { echo "::error::缺少 devices.csv.example"; exit 1; }
-          test -f docs/AUDIT-2026-10-21.md || { echo "::error::缺少审计报告"; exit 1; }
+          ls docs/audit/*.md >/dev/null 2>&1 || {
+            echo "::error::缺少审计报告 (docs/audit/*.md)"; exit 1; }
           test -f tests/test_regression.py || { echo "::error::缺少回归测试"; exit 1; }
           grep -q '^output/' .gitignore || { echo "::error::.gitignore 未忽略 output/"; exit 1; }
           echo "OK: 目录结构与约定一致"
@@ -121,6 +130,8 @@ jobs:
           cp profile.yaml data/profile.yaml
           cp rules.yaml data/rules.yaml
           cp snapshots/10.10.1.11.cfg data/snapshots/10.10.1.11.cfg
+          # 镜像以 uid 1000 运行, 挂载目录需要对它可写
+          chmod -R a+rwX data
           docker compose config >/dev/null
           echo "OK: compose 配置可解析"
 

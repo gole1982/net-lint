@@ -53,9 +53,11 @@ function sevClass(sev) {
 }
 
 function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s || "";
-  return d.innerHTML;
+  // 同时转义引号: esc 的输出也会用于 value="..."/onclick="..." 属性,
+  // 只替换 &<> 时属性里的引号会提前闭合标签。
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
 
 // ---- Tab 导航 ----
@@ -90,8 +92,8 @@ async function loadDevices() {
         <td>${esc(d.username)}</td>
         <td>${d.has_password ? "已设置" : '<span style="color:#dc2626">未设置</span>'}</td>
         <td>
-          <button class="btn btn-secondary btn-small" onclick="editDevice('${d.ip}')">编辑</button>
-          <button class="btn btn-danger btn-small" onclick="deleteDevice('${d.ip}')">删除</button>
+          <button class="btn btn-secondary btn-small" data-action="edit" data-ip="${esc(d.ip)}">编辑</button>
+          <button class="btn btn-danger btn-small" data-action="delete" data-ip="${esc(d.ip)}">删除</button>
         </td>
       </tr>
     `).join("");
@@ -99,6 +101,15 @@ async function loadDevices() {
     alert("加载设备失败: " + e.message);
   }
 }
+
+// 事件委派: 不把设备字段拼进 onclick 字符串, 避免属性逃逸
+document.getElementById("device-list").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const ip = btn.dataset.ip;
+  if (btn.dataset.action === "edit") editDevice(ip);
+  if (btn.dataset.action === "delete") deleteDevice(ip);
+});
 
 function showAddDevice() {
   document.getElementById("modal-title").textContent = "添加设备";
@@ -176,7 +187,10 @@ async function importCSV(e) {
     const token = getToken();
     const headers = token ? { "X-API-Token": token } : {};
     const res = await fetch("/api/devices/import", { method: "POST", body: formData, headers });
-    if (!res.ok) throw new Error("导入失败");
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "导入失败" }));
+      throw new Error(err.detail || "导入失败");
+    }
     const data = await res.json();
     alert(`导入成功: ${data.count} 台设备`);
     loadDevices();
@@ -282,9 +296,13 @@ async function startTask(offline) {
       document.getElementById("progress-text").textContent = pct + "%";
       document.getElementById("progress-detail").textContent =
         `${data.completed || 0} / ${data.total || 0}`;
-      if (data.status === "done") {
+      if (data.status === "done" || data.status === "failed") {
         _sseSource.close();
         _sseSource = null;
+        if (data.status === "failed") {
+          document.getElementById("progress-detail").textContent =
+            "任务失败: " + (data.message || "详情见服务端日志");
+        }
         loadTaskResults(task.task_id);
       }
     };
@@ -297,12 +315,39 @@ async function startTask(offline) {
   }
 }
 
+async function downloadReport(taskId, fmt) {
+  // 用 fetch + Blob 下载: <a href> 无法携带 X-API-Token 头,
+  // 不要把令牌拼进 URL (会进入访问日志/浏览器历史)。
+  try {
+    const res = await api(`/api/tasks/${taskId}/download/${fmt}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fmt === "md" ? "remediation_report.md" : "baseline_report.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("下载失败: " + e.message);
+  }
+}
+
+let _currentTaskId = null;
+
+document.getElementById("task-results").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-download]");
+  if (btn && _currentTaskId) downloadReport(_currentTaskId, btn.dataset.download);
+});
+
 async function loadTaskResults(taskId) {
   if (!taskId) {
     document.getElementById("task-results").innerHTML =
       '<div class="empty">点击上方按钮启动检查</div>';
     return;
   }
+  _currentTaskId = taskId;
   try {
     const data = await apiJSON(`/api/tasks/${taskId}/results`);
     const results = data.results || {};
@@ -322,6 +367,14 @@ async function loadTaskResults(taskId) {
           </div>
         `;
       }
+      if (r.status === "not_checked") {
+        return `
+          <div class="result-card">
+            <h4>${esc(r.ip)}（${esc(r.name)}）<span class="badge badge-suggest">未执行检查</span></h4>
+            <div class="result-item">${esc(r.message || "未执行任何规则, 结果不代表合规")}</div>
+          </div>
+        `;
+      }
       const findings = r.findings || [];
       if (!findings.length) {
         return `
@@ -330,15 +383,13 @@ async function loadTaskResults(taskId) {
           </div>
         `;
       }
-      const items = findings.map(([rule, findingList]) => {
-        return (findingList || []).map(f => `
+      const items = findings.map(f => `
           <div class="result-item">
-            <strong>[${esc(rule.rid)}]</strong> ${esc(rule.title)}
-            <span class="badge ${sevClass(rule.severity)}">${rule.severity}</span><br>
+            <strong>[${esc(f.rule_id)}]</strong> ${esc(f.title)}
+            <span class="badge ${sevClass(f.severity)}">${esc(f.severity)}</span><br>
             位置: ${esc(f.target)} | 证据: ${esc(f.evidence)}
           </div>
         `).join("");
-      }).join("");
       return `
         <div class="result-card fail">
           <h4>${esc(r.ip)}（${esc(r.name)}）<span class="badge badge-high">${findings.length} 项不合规</span></h4>
@@ -347,8 +398,8 @@ async function loadTaskResults(taskId) {
       `;
     }).join("") + `
       <div style="margin-top:16px;text-align:center">
-        <a href="/api/tasks/${taskId}/download/md" class="btn btn-secondary">下载MD报告</a>
-        <a href="/api/tasks/${taskId}/download/xlsx" class="btn btn-secondary">下载Excel报告</a>
+        <button class="btn btn-secondary" data-download="md">下载MD报告</button>
+        <button class="btn btn-secondary" data-download="xlsx">下载Excel报告</button>
       </div>
     `;
   } catch (e) {
@@ -384,6 +435,7 @@ async function runSelfCheck() {
       <p><strong>telnetlib:</strong> ${result.telnetlib ? '✓ 可用' : '✗ 不可用(仅离线模式可用)'}</p>
       <p><strong>PyYAML:</strong> ${esc(result.yaml_version)}</p>
       <p><strong>openpyxl:</strong> ${esc(result.openpyxl_version)}</p>
+      ${result.vendor_note ? `<p style="color:#dc2626"><strong>离线包提示:</strong> ${esc(result.vendor_note)}</p>` : ""}
     `;
   } catch (e) {
     alert("自检失败: " + e.message);

@@ -31,6 +31,17 @@ OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "output")
 
 logger = logging.getLogger("vrp_baseline")
 
+# 持有后台任务的强引用: asyncio 只保留弱引用, 不保存会被 GC 提前取消。
+_background_tasks = set()
+
+
+def _spawn(coro):
+    """创建后台任务并持有强引用, 完成后自动释放。"""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 def report_dir(task_id: str) -> str:
     """任务报告目录。
@@ -41,22 +52,52 @@ def report_dir(task_id: str) -> str:
     return os.path.join(OUTPUT_DIR, "reports", task_id)
 
 
-def _run_single_device(dev, rules, variables, offline, snapshots_dir, ip_list):
-    """同步: 采集单台设备配置 + 执行规则检查"""
+def _run_single_device(dev, rules, variables, offline, snapshots_dir):
+    """同步: 采集单台设备配置 + 执行规则检查
+
+    返回 (ip, dev, cfg, findings, stats)。stats 用于区分
+    "执行了规则且全部合规" 与 "一条规则都没执行"。
+    """
     from core.collector import fetch
-    from core.engine import run_all
+    from core.engine import run_all_detailed
     from core.credentials import resolve_credentials
 
     ip = dev["ip"]
     dev = resolve_credentials(dev)
 
     cfg = fetch(dev, offline=offline, snapshots_dir=snapshots_dir)
-    findings = run_all(
+    findings, stats = run_all_detailed(
         rules, cfg, variables,
         platform=dev.get("platform", ""),
         device_type=dev.get("type", ""),
     )
-    return ip, dev, cfg, findings
+    return ip, dev, cfg, findings, stats
+
+
+def _serialize_findings(findings, variables):
+    """把 [(Rule, [Finding])] 转成可 JSON 序列化的 DTO。
+
+    Check/Finding 使用 __slots__, 没有 __dict__; FastAPI 的 jsonable_encoder
+    对它们的兜底路径 (dict() -> vars()) 都会失败并抛 500。因此必须在写入
+    task_store 之前完成转换, /results 与 SSE 才能安全返回。
+    """
+    from core.reporter import render_fix
+
+    rows = []
+    for rule, items in findings:
+        for f in items:
+            fix = ""
+            if f.fix_lines and any(l.strip() for l in f.fix_lines):
+                fix = render_fix("\n".join(f.fix_lines), f.target, variables)
+            rows.append({
+                "rule_id": rule.rid,
+                "title": rule.title,
+                "severity": rule.severity,
+                "target": f.target,
+                "evidence": f.evidence,
+                "fix": fix,
+            })
+    return rows
 
 
 async def create_and_run_task(
@@ -103,8 +144,8 @@ async def create_and_run_task(
     task_store.create(task_id, total=len(devices))
     task_store.update(task_id, status=TaskStatus.running)
 
-    # 异步执行
-    asyncio.create_task(
+    # 异步执行 (保留强引用, 避免任务被 GC 取消)
+    _spawn(
         _run_task(task_id, devices, active_rules, variables, offline, snapshots_dir, base_dir)
     )
 
@@ -112,65 +153,101 @@ async def create_and_run_task(
 
 
 async def _run_task(task_id, devices, rules, variables, offline, snapshots_dir, base_dir):
-    """任务执行体"""
+    """任务执行体
+
+    任何未捕获异常都必须落到 failed 终态: 否则任务永远停在 running,
+    前端轮询不到结果, 下载接口也只会返回"任务尚未完成"。
+    """
+    from core.engine import not_checked_reason as _not_checked_reason
     from core.reporter import build_report_data, write_report_files, save_snapshots
 
     completed = 0
     results = {}
     cfg_map = {}
+    device_results = {}
 
-    # 使用线程池并发采集
-    workers = min(len(devices), 10) if devices else 1
-    loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            loop.run_in_executor(
-                pool, _run_single_device,
-                dev, rules, variables, offline, snapshots_dir, None
-            ): dev
-            for dev in devices
-        }
+    try:
+        # 使用线程池并发采集
+        workers = min(len(devices), 10) if devices else 1
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                loop.run_in_executor(
+                    pool, _run_single_device,
+                    dev, rules, variables, offline, snapshots_dir
+                ): dev
+                for dev in devices
+            }
 
-        for fut in asyncio.as_completed(futures):
-            dev = futures[fut]
-            ip = dev["ip"]
-            try:
-                ret_ip, ret_dev, cfg, findings = await fut
-                results[ret_ip] = findings
-                cfg_map[ret_ip] = cfg
-                task_store.set_result(task_id, ret_ip, {
-                    "ip": ret_ip,
-                    "name": ret_dev.get("name", ""),
-                    "status": "ok",
-                    "error": "",
-                    "findings": findings,
-                })
-            except Exception as e:
-                results[ip] = [("ERROR", (ip, str(e), []))]
-                task_store.set_result(task_id, ip, {
-                    "ip": ip,
-                    "name": dev.get("name", ""),
-                    "status": "error",
-                    "error": str(e),
-                    "findings": [],
-                })
-                logger.error(f"采集失败: {ip} - {e}")
+            # 必须用 async for: 普通 for 迭代 as_completed 得到的是
+            # _wait_for_one() 协程, 既不是原 Future 也无法反查设备, 必然 KeyError。
+            async for fut in asyncio.as_completed(futures):
+                dev = futures[fut]
+                ip = dev["ip"]
+                try:
+                    ret_ip, ret_dev, cfg, findings, stats = await fut
+                    results[ret_ip] = findings
+                    cfg_map[ret_ip] = cfg
+                    status = "ok" if stats.get("evaluated") else "not_checked"
+                    message = "" if status == "ok" else _not_checked_reason(stats)
+                    device_results[ret_ip] = {
+                        "status": status,
+                        "message": message,
+                        "checked_rules": stats.get("applied", 0),
+                        "total_rules": stats.get("total", 0),
+                    }
+                    task_store.set_result(task_id, ret_ip, {
+                        "ip": ret_ip,
+                        "name": ret_dev.get("name", ""),
+                        "status": status,
+                        "error": "",
+                        "message": message,
+                        "checked_rules": stats.get("applied", 0),
+                        "total_rules": stats.get("total", 0),
+                        "findings": _serialize_findings(findings, variables),
+                    })
+                except Exception as e:
+                    results[ip] = [("ERROR", (ip, str(e), []))]
+                    device_results[ip] = {"status": "error", "message": str(e)}
+                    task_store.set_result(task_id, ip, {
+                        "ip": ip,
+                        "name": dev.get("name", ""),
+                        "status": "error",
+                        "error": str(e),
+                        "message": "",
+                        "checked_rules": 0,
+                        "total_rules": 0,
+                        "findings": [],
+                    })
+                    logger.error(f"采集失败: {ip} - {e}")
 
-            completed += 1
-            task_store.update(
-                task_id,
-                completed=completed,
-                progress=completed / len(devices),
-            )
+                completed += 1
+                task_store.update(
+                    task_id,
+                    completed=completed,
+                    progress=completed / max(len(devices), 1),
+                )
 
-    # 生成报告数据
-    report_data = build_report_data(results, devices, variables)
+        # 生成报告数据
+        report_data = build_report_data(
+            results, devices, variables, device_results=device_results
+        )
 
-    # 写报告文件(按 task_id 隔离, 避免并发任务互相覆盖)
-    write_report_files(report_data, report_dir(task_id))
+        # 写报告文件(按 task_id 隔离, 避免并发任务互相覆盖)
+        write_report_files(report_data, report_dir(task_id))
 
-    # 快照保存(仅在线模式)
-    if not offline:
-        save_snapshots(cfg_map, devices, base_dir)
+        # 快照保存(仅在线模式)
+        if not offline:
+            save_snapshots(cfg_map, devices, base_dir)
 
-    task_store.update(task_id, status=TaskStatus.done, progress=1.0, message="检查完成")
+        task_store.update(
+            task_id, status=TaskStatus.done, progress=1.0, message="检查完成"
+        )
+    except Exception as e:
+        logger.exception(f"任务执行失败: {task_id}")
+        task_store.update(
+            task_id,
+            status=TaskStatus.failed,
+            message=f"任务执行失败: {e}",
+        )
+        raise

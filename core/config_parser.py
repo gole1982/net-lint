@@ -25,6 +25,9 @@ def split_blocks(cfg):
 
 
 # ---- 正则编译缓存 ----
+# 规则数 × 变量指纹是有限的, 但 profile 变量可经 API 任意写,
+# 不设上限时缓存会随请求无限增长。
+_TPL_CACHE_MAX = 2048
 _tpl_cache = {}
 
 
@@ -44,6 +47,9 @@ def compile_tpl(line, match_mode, variables):
     cached = _tpl_cache.get(cache_key)
     if cached is not None:
         return cached
+
+    if len(_tpl_cache) >= _TPL_CACHE_MAX:
+        _tpl_cache.clear()
 
     pat = ""
     pos = 0

@@ -29,7 +29,7 @@ if os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in sys.path:
     # 离线绿色版通过 PYTHONPATH=vendor:. 已经让 vendor 优先, 行为不变。
     sys.path.append(_VENDOR_DIR)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -87,13 +87,29 @@ _API_TOKEN = os.environ.get("VRP_API_TOKEN", "").strip()
 
 @app.middleware("http")
 async def api_token_guard(request, call_next):
-    """API 令牌校验中间件"""
-    if _API_TOKEN and request.url.path.startswith("/api"):
+    """API 令牌校验中间件
+
+    保护范围包括 /api 与 API 文档页: 否则未鉴权部署下 /docs 会直接暴露
+    全部接口定义。令牌比较先编码为 bytes —— hmac.compare_digest 对含
+    非 ASCII 字符的 str 会抛 TypeError (100% 拒登, 不是 401)。
+    """
+    path = request.url.path
+    guarded = (
+        path == "/api" or path.startswith("/api/")
+        or path in ("/docs", "/redoc", "/openapi.json")
+    )
+    if _API_TOKEN and guarded:
         token = request.headers.get("X-API-Token", "")
-        if not token:
-            # EventSource 无法自定义请求头, SSE 允许用查询参数传递
+        if not token and path.startswith("/api/sse/"):
+            # EventSource 无法自定义请求头, 仅 SSE 允许查询参数传递
             token = request.query_params.get("token", "")
-        if not token or not hmac.compare_digest(token, _API_TOKEN):
+        try:
+            valid = bool(token) and hmac.compare_digest(
+                token.encode("utf-8"), _API_TOKEN.encode("utf-8")
+            )
+        except (UnicodeError, TypeError):
+            valid = False
+        if not valid:
             return JSONResponse({"detail": "无效的 API 令牌"}, status_code=401)
     return await call_next(request)
 
@@ -118,13 +134,18 @@ sse_router = APIRouter(tags=["实时进度"])
 
 
 @sse_router.get("/api/sse/{task_id}")
-async def task_progress_sse(task_id: str):
+async def task_progress_sse(task_id: str, request: Request):
     """SSE 端点: 实时推送任务进度"""
     import asyncio
     import json
+    import time
 
     async def event_stream():
+        # 充满上限: 任务卡住时连接不能永久占用事件循环/连接槽
+        deadline = time.monotonic() + 600
         while True:
+            if await request.is_disconnected():
+                break
             t = task_store.get(task_id)
             if not t:
                 yield f"event: error\ndata: {json.dumps({'error': 'task not found'})}\n\n"
@@ -132,9 +153,20 @@ async def task_progress_sse(task_id: str):
             yield f"data: {json.dumps(t)}\n\n"
             if t["status"] in ("done", "failed"):
                 break
+            if time.monotonic() > deadline:
+                yield "event: error\ndata: {\"error\": \"stream timeout\"}\n\n"
+                break
             await asyncio.sleep(1)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 app.include_router(sse_router)

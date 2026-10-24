@@ -43,7 +43,7 @@
 #   ${varName}  → 引用 profile.yaml 中 variables 定义的变量值
 #                  列表类型变量会展开为 (?:val1|val2) 正则组
 #   ${if}      → 内置变量, 替换为当前不合规的目标名(接口名或视图名)
-#   ${platform} → 内置变量, 替换为当前设备平台标识
+#   ${platform} → 仅用于 match 模板(匹配任意平台标识); fix 中渲染为空串
 #
 # ── VRP唯一前缀兼容 ──────────────────────────────────────────────────────
 #
@@ -72,6 +72,8 @@
 #     检查 trunk 口是否放行 VLAN1(含 allow-pass all / pvid=1)
 #     检查 access/hybrid 口是否划入 VLAN1
 #     检查未显式配置 link-type 的端口(默认 pvid=1)
+#     按接口类型(access/trunk/hybrid)生成各自的整改命令,
+#     因此本规则无需在 rules.yaml 里写 fix 模板
 #
 # =============================================================================
 
@@ -92,8 +94,9 @@ rules:
             match: regex
             lines:
               # 兼容 ntp 和 ntp-service 唯一前缀
-              - '^ntp(?:-service)? unicast-server ${ntpServer1}\s*$'
-              - '^ntp(?:-service)? unicast-server ${ntpServer2}\s*$'
+              # ntp-service unicast-server X source Y 同样满足要求
+              - '^ntp(?:-service)? unicast-server ${ntpServer1}(?:\s+source\s+\S+)?\s*$'
+              - '^ntp(?:-service)? unicast-server ${ntpServer2}(?:\s+source\s+\S+)?\s*$'
         fix: |
           system-view
           ntp-service unicast-server ${ntpServer1}
@@ -204,6 +207,7 @@ rules:
     severity: high
     builtin: ipv6_deny_chain
     fix: |
+      system-view
       acl 4000
        rule 5 deny l2-protocol 0x86dd
       traffic classifier IPV6_DENY
@@ -222,6 +226,7 @@ rules:
     severity: high
     builtin: dhcp_deny_chain
     fix: |
+      system-view
       acl 3000
        rule 5 deny udp destination-port eq 67
        rule 10 deny udp destination-port eq 68
@@ -240,9 +245,6 @@ rules:
     platforms: [s-series, ce-series]
     severity: high
     builtin: vlan1_check
-    fix: |
-      interface ${if}
-       port trunk allow-pass vlan 2 to 4094
 
   # ==================== 端口安全 (S系列) ====================
   - id: SW-PS-01

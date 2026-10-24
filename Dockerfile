@@ -58,8 +58,13 @@ COPY . /app/
 # 确保入口脚本可执行
 RUN chmod +x /app/docker-entrypoint.sh
 
-# 创建数据目录 (运行时可通过 volume 挂载覆盖)
-RUN mkdir -p /app/snapshots /app/output
+# 以非 root 运行: 容器逃逸/写文件的攻击面从 root 降为普通用户。
+# uid 1000 与常见宿主首个用户一致, 便于 ./data 卷可写。
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin appuser \
+    && mkdir -p /app/snapshots /app/output \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 # 暴露 Web 端口
 EXPOSE 8080
