@@ -91,7 +91,8 @@ jobs:
           # 审计报告与回归测试会引用该口令作为缺陷证据, 属预期内容, 排除在外。
           # 注意: 匹配模式写成 'Huawei@12[0-9]' 而不是完整口令, 否则本 workflow
           # 文件自身(含该模式)会被 grep 命中, 形成自检误报。
-          # 同时覆盖两种历史写法: Huawei@123 与 Ro@Huawei123。
+          # 同时覆盖两种历史写法: Huawei@12[0-9] 与 (Ro|Rw)@Huawei[0-9]+。
+          # 注释里也不要写完整口令, 否则本文件会被自己的 grep 命中。
           hits=$(git grep -I -n -E 'Huawei@12[0-9]|(Ro|Rw)@Huawei[0-9]+' -- . \
             | grep -v -E '^(docs|tests)/' || true)
           if [ -n "$hits" ]; then
