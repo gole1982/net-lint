@@ -171,62 +171,73 @@ async def _run_task(task_id, devices, rules, variables, offline, snapshots_dir, 
         workers = min(len(devices), 10) if devices else 1
         loop = asyncio.get_running_loop()
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                loop.run_in_executor(
-                    pool, _run_single_device,
-                    dev, rules, variables, offline, snapshots_dir
-                ): dev
-                for dev in devices
-            }
-
-            # 必须用 async for: 普通 for 迭代 as_completed 得到的是
-            # _wait_for_one() 协程, 既不是原 Future 也无法反查设备, 必然 KeyError。
-            async for fut in asyncio.as_completed(futures):
-                dev = futures[fut]
-                ip = dev["ip"]
+            async def _collect_one(dev):
+                """在线程池里跑单台设备; 异常随结果返回, 不影响其它设备。"""
                 try:
-                    ret_ip, ret_dev, cfg, findings, stats = await fut
-                    results[ret_ip] = findings
-                    cfg_map[ret_ip] = cfg
-                    status = "ok" if stats.get("evaluated") else "not_checked"
-                    message = "" if status == "ok" else _not_checked_reason(stats)
-                    device_results[ret_ip] = {
-                        "status": status,
-                        "message": message,
-                        "checked_rules": stats.get("applied", 0),
-                        "total_rules": stats.get("total", 0),
-                    }
-                    task_store.set_result(task_id, ret_ip, {
-                        "ip": ret_ip,
-                        "name": ret_dev.get("name", ""),
-                        "status": status,
-                        "error": "",
-                        "message": message,
-                        "checked_rules": stats.get("applied", 0),
-                        "total_rules": stats.get("total", 0),
-                        "findings": _serialize_findings(findings, variables),
-                    })
-                except Exception as e:
-                    results[ip] = [("ERROR", (ip, str(e), []))]
-                    device_results[ip] = {"status": "error", "message": str(e)}
-                    task_store.set_result(task_id, ip, {
-                        "ip": ip,
-                        "name": dev.get("name", ""),
-                        "status": "error",
-                        "error": str(e),
-                        "message": "",
-                        "checked_rules": 0,
-                        "total_rules": 0,
-                        "findings": [],
-                    })
-                    logger.error(f"采集失败: {ip} - {e}")
+                    ret = await loop.run_in_executor(
+                        pool, _run_single_device,
+                        dev, rules, variables, offline, snapshots_dir
+                    )
+                    return dev, ret, None
+                except Exception as e:  # 单台失败只影响自己
+                    return dev, None, e
 
-                completed += 1
-                task_store.update(
-                    task_id,
-                    completed=completed,
-                    progress=completed / max(len(devices), 1),
+            # 不用 as_completed: 3.12 返回普通迭代器(元素是需 await 的协程),
+            # 3.13 又支持 async for, 两种写法无法同时兼容两端 —— 用普通 for
+            # 拿到的是协程而非原 Future, 反查设备必然 KeyError; 用 async for
+            # 在 3.12 上直接 TypeError。asyncio.wait 在两端语义一致,
+            # 且由 Task 自身带回设备信息。
+            pending = {asyncio.ensure_future(_collect_one(d)) for d in devices}
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
                 )
+                for fut in done:
+                    dev, ret, err = fut.result()
+                    ip = dev["ip"]
+                    if err is not None:
+                        results[ip] = [("ERROR", (ip, str(err), []))]
+                        device_results[ip] = {"status": "error", "message": str(err)}
+                        task_store.set_result(task_id, ip, {
+                            "ip": ip,
+                            "name": dev.get("name", ""),
+                            "status": "error",
+                            "error": str(err),
+                            "message": "",
+                            "checked_rules": 0,
+                            "total_rules": 0,
+                            "findings": [],
+                        })
+                        logger.error(f"采集失败: {ip} - {err}")
+                    else:
+                        ret_ip, ret_dev, cfg, findings, stats = ret
+                        results[ret_ip] = findings
+                        cfg_map[ret_ip] = cfg
+                        status = "ok" if stats.get("evaluated") else "not_checked"
+                        message = "" if status == "ok" else _not_checked_reason(stats)
+                        device_results[ret_ip] = {
+                            "status": status,
+                            "message": message,
+                            "checked_rules": stats.get("applied", 0),
+                            "total_rules": stats.get("total", 0),
+                        }
+                        task_store.set_result(task_id, ret_ip, {
+                            "ip": ret_ip,
+                            "name": ret_dev.get("name", ""),
+                            "status": status,
+                            "error": "",
+                            "message": message,
+                            "checked_rules": stats.get("applied", 0),
+                            "total_rules": stats.get("total", 0),
+                            "findings": _serialize_findings(findings, variables),
+                        })
+
+                    completed += 1
+                    task_store.update(
+                        task_id,
+                        completed=completed,
+                        progress=completed / max(len(devices), 1),
+                    )
 
         # 生成报告数据
         report_data = build_report_data(
